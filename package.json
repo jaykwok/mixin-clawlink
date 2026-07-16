@@ -11,8 +11,7 @@
     "start": "bun src/bootstrap.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "check": "tsc --noEmit",
-    "package:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1"
+    "check": "tsc --noEmit"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.211",

@@ -26,19 +26,12 @@ bun start          # 无 .env 时自动进设置向导
 - 走 router 用第三方模型（如 DeepSeek/GLM）：在 Claude Code 的 `~/.claude/settings.json`（或进程环境）里配置 `ANTHROPIC_BASE_URL` 与 key/token，再用 IM 的 `/model` 或面板「选择模型」按编号挑。模型拉取同时支持 Anthropic `/v1/models` 和 OpenAI `/models`；DeepSeek 的 `/anthropic` base 会自动转到根路径 `/models`。
 - Ctrl+C 优雅退出；运行期崩溃 5 秒自动重建。TUI 挂在重启循环之外，`/reboot` 只重建 bot，面板不闪退。
 
-## Windows one-dir 打包
-
-```powershell
-bun run package:windows
-```
-
-产物为 `dist/Mixin-ClawLink-v1.0.0-windows-x64.zip`：包含 Bun x64 运行时和生产依赖的 one-dir 包，解压后双击 `MixinClawLink.exe`，`start.cmd` 作为兼容入口。运行中可按 `Ctrl+B` 转入 Windows 系统托盘。发行包调用用户本机 Claude Code，不携带 SDK 自带的 253 MB CLI；打包过程也不会带入 `.env`、会话、日志或工作区数据，并会生成 SHA-256 校验文件。单文件 EXE 因 OpenTUI 在 Bun 编译模式下无法可靠刷新，当前不提供。
-
 ## 目录结构
 
 ```
 src/
 ├── bootstrap.ts        # 统一应用根目录，固定配置、日志和数据的落盘位置
+├── assets/icons/       # 透明 PNG 源图与 Windows ICO 应用图标
 ├── index.ts            # 主程序：挂 TUI（循环外）→ 首启向导门 → 软重启重建循环 + SIGINT
 ├── bot.ts              # 编排：WS onRaw→斜杠命令/dispatch；每用户锁；审批；/stop；只读状态访问器
 ├── config.ts           # .env + reload() + EDITABLE + /config setValue + writeEnvRaw + isDangerous

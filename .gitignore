@@ -27,6 +27,10 @@ coverage/
 *.tmp
 *.temp
 
+# Local packaging helpers
+packaging/
+scripts/package-*
+
 # Local research material (not required to build or run)
 _analysis/
 PROTOCOL.md
