@@ -9,9 +9,11 @@
  * - 日志用单个多行 <text>（内容整体替换），避免高频子节点 churn 触发 Windows 段错误(#1185)。
  * - renderer 自建（createCliRenderer），exitSignals:[] + exitOnCtrlC:false，退出由我们自己控。
  */
-import { createCliRenderer, type KeyEvent } from "@opentui/core";
-import { render, useKeyboard } from "@opentui/solid";
+import { createCliRenderer, type KeyEvent, type PasteEvent } from "@opentui/core";
+import { render, useKeyboard, usePaste } from "@opentui/solid";
 import { createSignal, onMount } from "solid-js";
+import { execFile } from "node:child_process";
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { cfg, reload, setValue, writeEnvRaw } from "../config.ts";
 import { setSuppressConsole, subscribeConsole } from "../logger.ts";
 import { fetchModels } from "../agents/models.ts";
@@ -66,6 +68,7 @@ let wizardDone = false;
 let wizardFromPanel = false;
 let quitFn: () => void = () => {};
 let resizeHandler: (() => void) | null = null;
+let replaceOnFirstEdit = false;
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
 function tailWindow(value: string, maxChars: number): string {
@@ -102,6 +105,87 @@ function selectWizardField(index: number): void {
   setDraft(WIZARD_FIELDS[next].get());
 }
 
+function enterWizardEditor(): void {
+  setDraft(WIZARD_FIELDS[fIdx()].get());
+  replaceOnFirstEdit = true;
+  setWizardFocus("editor");
+  setStatusMsg(WIZARD_FIELDS[fIdx()].choices?.length
+    ? "已进入选项框；用 ↑/↓ 选择，按 Enter 保存并返回列表"
+    : "已进入编辑框；原值已选中，直接输入或 Ctrl+V 会替换，Enter 保存返回");
+}
+
+function moveWizardChoice(direction: 1 | -1): void {
+  const choices = WIZARD_FIELDS[fIdx()].choices;
+  if (!choices?.length) return;
+  const current = choices.findIndex(choice => choice.toLowerCase() === draft().toLowerCase());
+  const base = current >= 0 ? current : 0;
+  setDraft(choices[(base + direction + choices.length) % choices.length]);
+  replaceOnFirstEdit = false;
+}
+
+function applyEditorInput(value: string): void {
+  if (replaceOnFirstEdit) {
+    replaceOnFirstEdit = false;
+    setDraft(value);
+  } else {
+    setDraft(current => current + value);
+  }
+}
+
+function applyPastedText(raw: string): void {
+  if (mode() !== "wizard" || wizardFocus() !== "editor") {
+    setStatusMsg("请先选中字段并按 Enter 进入编辑框，再执行粘贴");
+    return;
+  }
+  if (WIZARD_FIELDS[fIdx()].choices?.length) {
+    setStatusMsg("当前字段是选项，请用 ↑/↓ 选择后按 Enter 保存");
+    return;
+  }
+  const value = raw.replace(/\0/g, "").replace(/\r\n?/g, "\n").replace(/\n+$/g, "").replace(/\n/g, " ");
+  if (!value) { setStatusMsg("剪贴板中没有可粘贴的文本"); return; }
+  applyEditorInput(value);
+  setStatusMsg(`已粘贴 ${Array.from(value).length} 个字符；按 Enter 保存并返回列表`);
+}
+
+async function pasteFromWindowsClipboard(): Promise<void> {
+  if (mode() !== "wizard" || wizardFocus() !== "editor") {
+    setStatusMsg("请先选中字段并按 Enter 进入编辑框，再按 Ctrl+V");
+    return;
+  }
+  if (process.platform !== "win32") {
+    setStatusMsg("当前终端未发送粘贴内容，请使用终端原生粘贴快捷键");
+    return;
+  }
+  try {
+    const text = await new Promise<string>((resolve, reject) => {
+      execFile("powershell", ["-NoProfile", "-Command", "Get-Clipboard -Raw"], { encoding: "utf8", windowsHide: true }, (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout);
+      });
+    });
+    applyPastedText(text);
+  } catch (error) {
+    setStatusMsg(`读取剪贴板失败：${(error as Error).message}`);
+  }
+}
+
+function handlePaste(event: PasteEvent): void {
+  event.preventDefault();
+  applyPastedText(new TextDecoder().decode(event.bytes));
+}
+
+function minimizeToTray(): void {
+  if (process.platform !== "win32") { setStatusMsg("后台托盘功能仅支持 Windows"); return; }
+  const requestFile = process.env.MIXIN_TRAY_HIDE_FILE;
+  if (!requestFile) { setStatusMsg("请通过 one-dir 包中的 MixinClawLink.exe 启动，才能使用 Ctrl+B 托盘后台"); return; }
+  try {
+    writeFileSync(requestFile, String(Date.now()), "utf8");
+    setStatusMsg("已转入后台；双击托盘图标恢复，右键菜单可退出");
+  } catch (error) {
+    setStatusMsg(`转入后台失败：${(error as Error).message}`);
+  }
+}
+
 function commitField(): boolean {
   const f = WIZARD_FIELDS[fIdx()];
   try { f.set(draft()); setStatusMsg(`✓ 已保存：${f.label.split("（")[0]}`); return true; }
@@ -128,6 +212,7 @@ function openConfigEditor(): void {
   reload();
   wizardFromPanel = true;
   setWizardFocus("fields");
+  replaceOnFirstEdit = false;
   selectWizardField(0);
   setMode("wizard");
   setStatusMsg("已读取当前 .env");
@@ -182,7 +267,9 @@ const ACTION_LIST: { label: string; detail: string; run: () => void | Promise<vo
 function refreshActions(): void { setActions(ACTION_LIST.map(a => a.label)); setSelAct(0); setModelPick(false); }
 
 // ── 键盘派发 ──────────────────────────────────────────────────────
-function isPrintable(s: string): boolean { return s.length === 1 && s.charCodeAt(0) >= 0x20 && s.charCodeAt(0) < 0x7f; }
+function isPrintable(s: string): boolean {
+  return Array.from(s).length === 1 && !/[\u0000-\u001f\u007f]/.test(s);
+}
 function keyDigit(name: string, seq: string): number | null {
   const raw = /^[1-9]$/.test(seq) ? seq : /^[1-9]$/.test(name) ? name : "";
   return raw ? Number(raw) : null;
@@ -199,6 +286,8 @@ function handleKey(key: KeyEvent): void {
   const seq: string = key?.sequence ?? "";
   const name: string = key?.name ?? "";
   if (key?.ctrl && name === "c") { quitFn(); return; }
+  if (key?.ctrl && name === "b") { minimizeToTray(); return; }
+  if (mode() === "wizard" && key?.ctrl && name === "v") { void pasteFromWindowsClipboard(); return; }
   if (mode() === "wizard" && key?.ctrl && (name === "s" || seq === "\x13")) { finalizeWizard(); return; }
   if (mode() === "wizard") return handleWizardKey(name, seq, key.shift);
   // panel
@@ -220,10 +309,22 @@ function handleKey(key: KeyEvent): void {
 }
 
 function handleWizardKey(name: string, seq: string, shift: boolean): void {
-  if (name === "escape") { cancelWizard(); return; }
+  if (name === "escape") {
+    if (wizardFocus() === "editor") {
+      setDraft(WIZARD_FIELDS[fIdx()].get());
+      replaceOnFirstEdit = false;
+      setWizardFocus("fields");
+      setStatusMsg("已放弃当前字段的编辑，返回字段列表");
+    } else cancelWizard();
+    return;
+  }
   if (name === "tab") {
-    setWizardFocus(current => current === "fields" ? "editor" : "fields");
-    setStatusMsg(shift ? "焦点已反向切换" : "焦点已切换");
+    if (wizardFocus() === "fields") enterWizardEditor();
+    else {
+      replaceOnFirstEdit = false;
+      setWizardFocus("fields");
+      setStatusMsg(shift ? "已反向切回字段列表（当前修改尚未保存）" : "已切回字段列表（当前修改尚未保存）");
+    }
     return;
   }
   if (wizardFocus() === "fields") {
@@ -237,30 +338,36 @@ function handleWizardKey(name: string, seq: string, shift: boolean): void {
       selectWizardField(movePageSelection(WIZARD_FIELDS.length, fIdx(), name === "pagedown" ? 1 : -1));
       return;
     }
+    if (name === "up" || seq === "k") {
+      selectWizardField(fIdx() - 1);
+      return;
+    }
+    if (name === "down" || seq === "j") {
+      selectWizardField(fIdx() + 1);
+      return;
+    }
+    if (name === "left" || name === "right") return;
+  } else {
+    if (name === "up" || name === "left" || seq === "k") { moveWizardChoice(-1); return; }
+    if (name === "down" || name === "right" || seq === "j") { moveWizardChoice(1); return; }
   }
-  if (name === "left" || name === "right") {
-    const choices = WIZARD_FIELDS[fIdx()].choices;
-    if (choices?.length) {
-      const current = choices.findIndex(choice => choice.toLowerCase() === draft().toLowerCase());
-      const dir = name === "right" ? 1 : -1;
-      const next = (Math.max(0, current) + dir + choices.length) % choices.length;
-      setDraft(choices[next]);
+  if (name === "return" || name === "enter") {
+    if (wizardFocus() === "fields") enterWizardEditor();
+    else if (commitField()) {
+      replaceOnFirstEdit = false;
+      setWizardFocus("fields");
+      setDraft(WIZARD_FIELDS[fIdx()].get());
     }
     return;
   }
-  if (name === "up" || seq === "k") {
-    const n = clamp(fIdx() - 1, 0, WIZARD_FIELDS.length - 1); setFIdx(n); setDraft(WIZARD_FIELDS[n].get()); return;
-  }
-  if (name === "down" || seq === "j") {
-    const n = clamp(fIdx() + 1, 0, WIZARD_FIELDS.length - 1); setFIdx(n); setDraft(WIZARD_FIELDS[n].get()); return;
-  }
-  if (name === "return" || name === "enter") {
-    commitField();
-    const n = clamp(fIdx() + 1, 0, WIZARD_FIELDS.length - 1); setFIdx(n); setDraft(WIZARD_FIELDS[n].get()); return;
-  }
   if (wizardFocus() === "fields") return;
-  if (name === "backspace" || name === "delete" || seq === "\x7f" || seq === "\b") { setDraft(d => d.slice(0, -1)); return; }
-  if (isPrintable(seq)) setDraft(d => d + seq);
+  if (WIZARD_FIELDS[fIdx()].choices?.length) return;
+  if (name === "backspace" || name === "delete" || seq === "\x7f" || seq === "\b") {
+    if (replaceOnFirstEdit) { replaceOnFirstEdit = false; setDraft(""); }
+    else setDraft(d => d.slice(0, -1));
+    return;
+  }
+  if (isPrintable(seq)) applyEditorInput(seq);
 }
 
 function navPanel(dir: number): void {
@@ -435,11 +542,17 @@ function ActionsView() {
 
 function hints(): string {
   const compact = terminalSize().width < 100;
-  if (compact && mode() === "wizard") return `[Tab] 焦点  [1–9] 选择  [PgUp/PgDn] 翻页  [Ctrl+S] 保存  [Esc] 返回`;
-  if (compact && view() === "logs") return "[Tab/←→] 切视图  [q] 退出";
+  if (compact && mode() === "wizard") return wizardFocus() === "fields"
+    ? "[Enter] 编辑  [1–9/↑↓] 选择  [PgUp/PgDn] 翻页  [Esc] 返回"
+    : WIZARD_FIELDS[fIdx()].choices?.length ? "[↑↓] 选择  [Enter] 保存返回  [Esc] 放弃" : "[输入/Ctrl+V] 编辑  [Enter] 保存返回  [Esc] 放弃";
+  if (compact && view() === "logs") return "[Tab/←→] 切视图  [Ctrl+B] 后台  [q] 退出";
   if (compact) return "[1–9] 执行  [↑↓] 选择  [PgUp/PgDn] 翻页  [Esc] 返回";
-  if (mode() === "wizard") return `[Tab/Shift+Tab] 列表 ↔ 输入  [1–9] 当前页  [PgUp/PgDn] 翻页  [←→] 切选项  [Ctrl+S] ${wizardFromPanel ? "保存返回" : "保存启动"}  [Esc] 返回`;
-  if (view() === "logs") return "[Tab/Shift+Tab 或 ←/→] 切换视图  [q / Ctrl+C] 退出";
+  if (mode() === "wizard") return wizardFocus() === "fields"
+    ? `[Enter] 进入编辑  [1–9/↑↓] 选择字段  [PgUp/PgDn] 翻页  [Ctrl+S] ${wizardFromPanel ? "完成配置" : "保存启动"}  [Esc] 返回`
+    : WIZARD_FIELDS[fIdx()].choices?.length
+      ? "[↑↓/←→] 切换选项  [Enter] 保存并返回列表  [Esc] 放弃当前选择"
+      : "[输入/Ctrl+V] 编辑  [Enter] 保存并返回列表  [Esc] 放弃当前编辑";
+  if (view() === "logs") return "[Tab/Shift+Tab 或 ←/→] 切换视图  [Ctrl+B] 托盘后台  [q / Ctrl+C] 退出";
   if (view() === "sessions") return "[1–9] 打开当前页用户  [↑↓/jk] 选择  [PgUp/PgDn] 翻页  [t] 测试  [Esc] 日志";
   return "[1–9] 执行当前页项目  [↑↓/jk] 选择  [PgUp/PgDn] 翻页  [Enter] 执行  [Esc] 返回";
 }
@@ -476,13 +589,29 @@ function WizardView() {
           })}
         </box>
         <box flexGrow={1} flexShrink={1} flexBasis={0} border borderColor={wizardFocus() === "editor" ? C.accent : C.border} backgroundColor={C.raised} title=" 当前值 " titleColor={wizardFocus() === "editor" ? C.accent : C.dim} flexDirection="column">
+          <text fg={wizardFocus() === "editor" ? C.cyan : C.subtle} wrapMode="none" truncate> {wizardFocus() === "editor" ? (current().choices?.length ? "SELECTING · ↑/↓ 选择 · Enter 保存返回" : "EDITING · Enter 保存返回 · Ctrl+V 粘贴") : "READY · Enter 进入编辑"}</text>
           <text fg={C.subtle}> FIELD</text>
           <box width="100%" height={2} flexShrink={0} overflow="hidden"><text fg={C.text} wrapMode="word" truncate> {current().label}</text></box>
-          <text fg={C.subtle}> VALUE</text>
-          <box width="100%" height={3} flexShrink={0} overflow="hidden" border borderColor={wizardFocus() === "editor" ? C.cyan : C.borderSoft} backgroundColor={C.input}>
-            <text fg={draft() ? C.green : C.subtle} wrapMode="none" truncate> {draft() ? tailWindow(draft(), Math.max(12, Math.floor(terminalSize().width / 2) - 8)) : "（空值；Tab 切到此处输入）"}</text>
-          </box>
-          {current().choices?.length ? <text fg={C.dim}> 可选：{current().choices?.join("  /  ")}</text> : <text fg={C.dim}> 文本字段 · 切换到输入区后直接键入</text>}
+          {wizardFocus() === "editor" && current().choices?.length ? (
+            <box width="100%" flexGrow={1} flexShrink={1} flexBasis={0} overflow="hidden" border borderColor={C.cyan} backgroundColor={C.input} title=" 请选择 " titleColor={C.cyan} flexDirection="column">
+              {current().choices?.map((choice, index) => {
+                const selected = () => choice.toLowerCase() === draft().toLowerCase();
+                return (
+                  <box width="100%" height={1} flexShrink={0} overflow="hidden" backgroundColor={selected() ? C.selected : C.input}>
+                    <text fg={selected() ? C.accent : C.text} wrapMode="none" truncate>{`${selected() ? "●" : "○"} [${index + 1}] ${choice}`}</text>
+                  </box>
+                );
+              })}
+            </box>
+          ) : (
+            <>
+              <text fg={C.subtle}> VALUE</text>
+              <box width="100%" height={3} flexShrink={0} overflow="hidden" border borderColor={wizardFocus() === "editor" ? C.cyan : C.borderSoft} backgroundColor={C.input}>
+                <text fg={draft() ? C.green : C.subtle} wrapMode="none" truncate> {draft() ? tailWindow(draft(), Math.max(12, Math.floor(terminalSize().width / 2) - 8)) : "（空值；按 Enter 进入编辑）"}</text>
+              </box>
+              {current().choices?.length ? <text fg={C.dim} wrapMode="none" truncate> 候选项：按 Enter 展开完整选择框</text> : <text fg={C.dim}> 文本字段 · 按 Enter 后直接输入</text>}
+            </>
+          )}
         </box>
       </box>
       <BottomBar />
@@ -509,6 +638,7 @@ function PanelView() {
 function App() {
   onMount(() => { setDraft(WIZARD_FIELDS[0].get()); refreshActions(); if (mode() === "panel") void refreshUsers(); });
   useKeyboard(handleKey);
+  usePaste(handlePaste);
   return (
     <box width="100%" height="100%" flexGrow={1} flexDirection="column" backgroundColor={C.bg}>
       {mode() === "wizard" ? <WizardView /> : <PanelView />}
@@ -547,6 +677,12 @@ export async function startTui(opts: { onQuit: () => void }): Promise<TuiHandle>
   const flush = setInterval(() => { if (dirty) { dirty = false; setLogs([...ring]); } }, 120);
   const authTimer = setInterval(() => { if (currentBot) setAuthStatus(currentBot.getAuthStatus()); }, 1000);
   const usersTimer = setInterval(() => { void registry.listUsers().then(us => setUserCount(us.length)).catch(() => {}); }, 5000);
+  const trayExitFile = process.env.MIXIN_TRAY_EXIT_FILE;
+  const trayTimer = setInterval(() => {
+    if (!trayExitFile || !existsSync(trayExitFile)) return;
+    try { unlinkSync(trayExitFile); } catch { /* 忽略 */ }
+    quitFn();
+  }, 250);
 
   renderer = await createCliRenderer({ exitOnCtrlC: false, exitSignals: [], useKittyKeyboard: null });
   render(() => <App />, renderer);
@@ -568,7 +704,7 @@ export async function startTui(opts: { onQuit: () => void }): Promise<TuiHandle>
     detachBot: () => { /* 旧 ws 回调随旧 ConnectionManager 一起作废；attachBot 会重接 */ },
     isDestroyed: () => renderer === null,
     shutdown: async () => {
-      clearInterval(flush); clearInterval(authTimer); clearInterval(usersTimer);
+      clearInterval(flush); clearInterval(authTimer); clearInterval(usersTimer); clearInterval(trayTimer);
       if (resizeHandler) { process.stdout.off("resize", resizeHandler); resizeHandler = null; }
       unsub();
       setSuppressConsole(false);

@@ -9,12 +9,13 @@
 - **Bun ≥ 1.3**（OpenTUI 渲染器要 Bun 或 Node 26.4+ FFI；本项目按 Bun 跑）
 - 量子密信智能助理的 `appId` / `appSecret`（客户端 → 通讯录 → 智能助理 → 详情页 apikey）
 - **Claude Code 由你自备**：本程序不写入 `ANTHROPIC_*`；会优先读进程环境，并自动从 `~/.claude/settings.json` 的 `env` 读取 base-url/key/token（`AGENT=claude` 时）。
+- Claude Agent 会优先使用 `CLAUDE_CLI_PATH`，未配置时自动寻找用户本机安装的 `claude.exe` / `cli.js`；发行包不会重复携带 SDK 的平台 CLI。
 
 ## 安装 / 运行
 
 ```bash
 bun install        # 装 @anthropic-ai/claude-agent-sdk + ws + dotenv + OpenTUI(+solid-js)
-bun src/index.ts   # = bun start；无 .env 时自动进设置向导
+bun start          # 无 .env 时自动进设置向导
 ```
 
 - **首次运行**（无 `.env` 或缺凭据）：自动进 TUI 设置向导，填 `APP_ID`/`APP_SECRET` 等，`Ctrl+S` 保存并启动。**无需** `cp .env.example .env`（已无此文件，向导即唯一配置入口）。
@@ -31,13 +32,14 @@ bun src/index.ts   # = bun start；无 .env 时自动进设置向导
 bun run package:windows
 ```
 
-产物位于 `dist/Mixin-ClawLink-v1.0.0-windows-x64.zip`。这是包含 Bun x64 运行时和生产依赖的自包含目录包，不生成单文件 EXE；解压后双击 `start.cmd` 即可运行。打包过程不会带入本机 `.env`、会话、日志或工作区数据，并会同时生成 `.zip.sha256` 校验文件。
+产物为 `dist/Mixin-ClawLink-v1.0.0-windows-x64.zip`：包含 Bun x64 运行时和生产依赖的 one-dir 包，解压后双击 `MixinClawLink.exe`，`start.cmd` 作为兼容入口。运行中可按 `Ctrl+B` 转入 Windows 系统托盘。发行包调用用户本机 Claude Code，不携带 SDK 自带的 253 MB CLI；打包过程也不会带入 `.env`、会话、日志或工作区数据，并会生成 SHA-256 校验文件。单文件 EXE 因 OpenTUI 在 Bun 编译模式下无法可靠刷新，当前不提供。
 
 ## 目录结构
 
 ```
 src/
-├── index.ts            # 入口：先挂 TUI（循环外）→ 首启向导门 → 软重启重建循环 + SIGINT
+├── bootstrap.ts        # 统一应用根目录，固定配置、日志和数据的落盘位置
+├── index.ts            # 主程序：挂 TUI（循环外）→ 首启向导门 → 软重启重建循环 + SIGINT
 ├── bot.ts              # 编排：WS onRaw→斜杠命令/dispatch；每用户锁；审批；/stop；只读状态访问器
 ├── config.ts           # .env + reload() + EDITABLE + /config setValue + writeEnvRaw + isDangerous
 ├── logger.ts           # 控制台 + 按大小轮转文件（无依赖）；sink/suppressConsole 供 TUI 接管
@@ -126,7 +128,7 @@ src/
 
 ## 源码运行
 
-源码部署只需仓库内容；目标机执行 `bun install --production && bun src/index.ts`，首次运行会自动进入设置向导。本机配置、会话数据、日志、工作区与构建产物均由 `.gitignore` 排除。
+源码部署只需仓库内容；目标机执行 `bun install --production && bun start`，首次运行会自动进入设置向导。本机配置、会话数据、日志、工作区与构建产物均由 `.gitignore` 排除。
 
 ## 备注 / 已知限制
 

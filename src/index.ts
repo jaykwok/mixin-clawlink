@@ -1,5 +1,5 @@
 /**
- * 入口：bun src/index.ts
+ * 主程序入口；统一从 src/bootstrap.ts 启动。
  *
  * 启动即起 TUI（OpenTUI 运维面板 / 首启向导）。TUI 挂在重启循环之外，
  * 软重启（/reboot）只重建 Bot，TUI 不销毁。Ctrl+C 优雅退出；

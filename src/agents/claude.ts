@@ -18,15 +18,25 @@ import { cfg, isDangerous } from "../config.ts";
 import { getLogger } from "../logger.ts";
 import { guessMime } from "../mime.ts";
 import type { Agent, AskPermission, ReplyOpts, ReplyResult } from "./base.ts";
+import { resolveClaudeCliPath } from "./claude-cli.ts";
 
 const log = getLogger("agent:claude");
 const IMG_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 
 export class ClaudeAgent implements Agent {
   readonly name = "claude";
+  private claudeCliPath = "";
 
   async startup(): Promise<void> {
-    /* SDK 在 import 时校验；无额外资源要初始化 */
+    const path = resolveClaudeCliPath(cfg.CLAUDE_CLI_PATH);
+    if (!path) {
+      const detail = cfg.CLAUDE_CLI_PATH
+        ? `配置的 CLAUDE_CLI_PATH 不存在或不是可执行入口：${cfg.CLAUDE_CLI_PATH}`
+        : "未找到本机 Claude Code。请先安装 Claude Code，或在 TUI 中填写 CLAUDE_CLI_PATH。";
+      throw new Error(detail);
+    }
+    this.claudeCliPath = path;
+    log.info("使用本机 Claude Code: %s", path);
   }
   async shutdown(): Promise<void> {}
 
@@ -50,7 +60,7 @@ export class ClaudeAgent implements Agent {
       allowedTools: dangerOn ? cfg.CLAUDE_ALLOWED_TOOLS.filter(t => t !== "Bash") : [...cfg.CLAUDE_ALLOWED_TOOLS],
     };
     if (cfg.CLAUDE_MODEL) options.model = cfg.CLAUDE_MODEL;
-    if (cfg.CLAUDE_CLI_PATH) options.pathToClaudeCodeExecutable = cfg.CLAUDE_CLI_PATH;
+    options.pathToClaudeCodeExecutable = this.claudeCliPath;
     if (opts.sessionId) options.resume = opts.sessionId;
     if (opts.abortController) options.abortController = opts.abortController;
     if (dangerOn && opts.askPermission) options.canUseTool = makeCanUseTool(uid, opts.askPermission);

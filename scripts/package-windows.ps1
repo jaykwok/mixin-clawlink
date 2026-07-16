@@ -80,6 +80,13 @@ Copy-Item -LiteralPath (Join-Path $root "packaging\windows\README-WINDOWS.md") -
 Copy-Item -LiteralPath (Join-Path $root "packaging\windows\BUN-LICENSE.md") -Destination (Join-Path $packageDir "BUN-LICENSE.md")
 Copy-Item -LiteralPath $BunExe -Destination (Join-Path $packageDir "runtime\bun.exe")
 
+$launcherSource = Join-Path $root "packaging\windows\Launcher.cs"
+$launcherExe = Join-Path $packageDir "MixinClawLink.exe"
+$launcherIcon = Join-Path $root "assets\icons\mixin-clawlink.ico"
+if (-not (Test-Path -LiteralPath $launcherIcon -PathType Leaf)) { throw "Missing Windows application icon: $launcherIcon" }
+Add-Type -Path $launcherSource -OutputAssembly $launcherExe -OutputType ConsoleApplication -CompilerOptions "/win32icon:`"$launcherIcon`"" -ReferencedAssemblies @("System.dll", "System.Drawing.dll", "System.Windows.Forms.dll")
+if (-not (Test-Path -LiteralPath $launcherExe -PathType Leaf)) { throw "Windows launcher compilation failed" }
+
 Push-Location $packageDir
 $oldTemp = $env:TEMP
 $oldTmp = $env:TMP
@@ -88,8 +95,16 @@ try {
   $env:TEMP = $tempDir
   $env:TMP = $tempDir
   $env:BUN_INSTALL_CACHE_DIR = (Join-Path $tempDir "bun-cache")
-  & ".\runtime\bun.exe" install --production --frozen-lockfile --ignore-scripts
+  & ".\runtime\bun.exe" install --production --frozen-lockfile --ignore-scripts --omit=optional
   if ($LASTEXITCODE -ne 0) { throw "Production dependency installation failed with exit code $LASTEXITCODE" }
+  $openTuiNativeSource = Join-Path $root "node_modules\@opentui\core-win32-x64"
+  $openTuiNativeTarget = Join-Path $packageDir "node_modules\@opentui\core-win32-x64"
+  if (-not (Test-Path -LiteralPath $openTuiNativeSource -PathType Container)) { throw "Missing OpenTUI win32-x64 native package" }
+  New-Item -ItemType Directory -Force -Path (Split-Path $openTuiNativeTarget -Parent) | Out-Null
+  Copy-Item -LiteralPath $openTuiNativeSource -Destination $openTuiNativeTarget -Recurse
+  if (Test-Path -LiteralPath (Join-Path $packageDir "node_modules\@anthropic-ai\claude-agent-sdk-win32-x64")) {
+    throw "Bundled Claude CLI must not be present in the one-dir package"
+  }
   & ".\runtime\bun.exe" -e "await import('./src/tui/index.tsx'); console.log('Runtime import OK')"
   if ($LASTEXITCODE -ne 0) { throw "Packaged runtime smoke test failed with exit code $LASTEXITCODE" }
 } finally {
