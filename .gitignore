@@ -1,0 +1,45 @@
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local agent/editor state
+.agents/
+.claude/
+.codex/
+.idea/
+.vscode/
+
+# Runtime data
+workspace/
+data/
+logs/
+*.log
+
+# Dependencies, caches, and build output
+node_modules/
+dist/
+coverage/
+.bun/
+*.tsbuildinfo
+*.tmp
+*.temp
+
+# Local research material (not required to build or run)
+_analysis/
+PROTOCOL.md
+
+# Alternative package-manager files
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Archives and operating-system metadata
+*.zip
+*.7z
+*.tar.gz
+.DS_Store
+Thumbs.db
+Desktop.ini

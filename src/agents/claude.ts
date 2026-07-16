@@ -1,0 +1,152 @@
+/**
+ * Claude Code 适配器（Claude Agent SDK）。
+ *
+ * - 多轮记忆：用 SDK 原生 resume（opts.sessionId），不再注入 JSONL 历史。
+ * - 多模态：图片优先作为 image block 注入 prompt（不依赖 Read）；失败回退到 Read。
+ * - 危险操作审批：CLAUDE_DANGER_CONFIRM 开启 + 提供 askPermission 时，装 canUseTool；
+ *   ⚠️ canUseTool 只对"未在 allowedTools 里、又未被自动拒"的工具触发，所以危险确认开启时
+ *   把 Bash 从 allowedTools 移除，让它走闸门；关闭时 bypassPermissions 全自动（headless 不挂）。
+ * - 中断：opts.abortController 透传给 options.abortController（/stop）。
+ *
+ * query() 无状态，每消息独立；session_id 从 result 消息抓取回写 registry。
+ */
+import { readFileSync } from "node:fs";
+import { basename, extname } from "node:path";
+import { query } from "@anthropic-ai/claude-agent-sdk";
+import type { Options, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import { cfg, isDangerous } from "../config.ts";
+import { getLogger } from "../logger.ts";
+import { guessMime } from "../mime.ts";
+import type { Agent, AskPermission, ReplyOpts, ReplyResult } from "./base.ts";
+
+const log = getLogger("agent:claude");
+const IMG_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
+
+export class ClaudeAgent implements Agent {
+  readonly name = "claude";
+
+  async startup(): Promise<void> {
+    /* SDK 在 import 时校验；无额外资源要初始化 */
+  }
+  async shutdown(): Promise<void> {}
+
+  async reply(uid: string, text: string, workspace: string, attachments: string[], opts: ReplyOpts = {}): Promise<ReplyResult> {
+    const images = attachments.filter(a => IMG_EXTS.has(extname(a).toLowerCase()));
+    const others = attachments.filter(a => !IMG_EXTS.has(extname(a).toLowerCase()));
+    const promptText = buildPrompt(text, others, images, workspace);
+    log.info("claude query: cwd=%s model=%s permission=%s imgs=%d resume=%s", workspace, cfg.CLAUDE_MODEL || "(默认)", cfg.CLAUDE_PERMISSION, images.length, opts.sessionId ? "(续)" : "(新)");
+
+    const dangerOn = !!cfg.CLAUDE_DANGER_CONFIRM && !!opts.askPermission;
+    // bypassPermissions 会绕开 canUseTool；危险确认开启时强制退回 default，确保危险 Bash 仍会询问用户。
+    const permissionMode = dangerOn && cfg.CLAUDE_PERMISSION === "bypassPermissions"
+      ? "default"
+      : dangerOn ? cfg.CLAUDE_PERMISSION : "bypassPermissions";
+    const options: Options = {
+      cwd: workspace,
+      systemPrompt: cfg.SYSTEM_PROMPT + cfg.FILE_RETURN_INSTRUCTION,
+      permissionMode,
+      allowDangerouslySkipPermissions: permissionMode === "bypassPermissions" ? true : undefined,
+      // 危险确认开启时移除 Bash，让它流入 canUseTool 闸门；关闭时全量放行
+      allowedTools: dangerOn ? cfg.CLAUDE_ALLOWED_TOOLS.filter(t => t !== "Bash") : [...cfg.CLAUDE_ALLOWED_TOOLS],
+    };
+    if (cfg.CLAUDE_MODEL) options.model = cfg.CLAUDE_MODEL;
+    if (cfg.CLAUDE_CLI_PATH) options.pathToClaudeCodeExecutable = cfg.CLAUDE_CLI_PATH;
+    if (opts.sessionId) options.resume = opts.sessionId;
+    if (opts.abortController) options.abortController = opts.abortController;
+    if (dangerOn && opts.askPermission) options.canUseTool = makeCanUseTool(uid, opts.askPermission);
+
+    let capturedSessionId: string | undefined;
+    const parts: string[] = [];
+    const collect = async (prompt: string | AsyncIterable<unknown>) => {
+      for await (const msg of query({ prompt: prompt as any, options })) {
+        const m = msg as any;
+        if (m.type === "assistant") {
+          for (const block of m.message.content) {
+            if (block.type === "text" && block.text) parts.push(block.text);
+          }
+        } else if (m.type === "result") {
+          capturedSessionId = m.session_id;
+          if (m.subtype !== "success") log.warn("claude result 非成功: %s is_error=%s", m.subtype, m.is_error);
+        }
+      }
+    };
+
+    const imageBlocks = makeImageBlocks(images);
+    if (imageBlocks.length) {
+      try {
+        await collect(userStream(promptText, imageBlocks));
+      } catch (e) {
+        // /stop 或会话切换触发的中断：不要回退重试，直接中止（否则会再起一次 query）
+        if ((e as Error).name === "AbortError") throw e;
+        log.warn("图片 image block 注入失败，回退到 Read 方式: %s", (e as Error).message);
+        await collect(buildPrompt(text, attachments, [], workspace));
+      }
+    } else {
+      await collect(promptText);
+    }
+
+    const resultText = parts.join("").trim() || "(已完成，无文本输出。若需要请查看回传的文件。)";
+    return { text: resultText, sessionId: capturedSessionId };
+  }
+}
+
+function makeCanUseTool(uid: string, askPermission: AskPermission) {
+  const cb = async (toolName: string, input: Record<string, unknown>): Promise<PermissionResult> => {
+    try {
+      if (isDangerous(toolName, input)) {
+        const ok = await askPermission(uid, toolName, summarize(toolName, input));
+        if (!ok) return { behavior: "deny", message: "用户在聊天框拒绝了该操作。" };
+      }
+      return { behavior: "allow" };
+    } catch (e) {
+      log.warn("canUseTool 异常，默认放行: %s", (e as Error).message);
+      return { behavior: "allow" };
+    }
+  };
+  return cb as any; // SDK 的 CanUseTool 多一个 options 参数；我们忽略它
+}
+
+function summarize(toolName: string, input: Record<string, unknown>): string {
+  if (input && typeof input === "object") {
+    const cmd = input.command as string | undefined;
+    if (cmd) return `$ ${cmd}`;
+    const fp = input.file_path as string | undefined;
+    if (fp) return `${toolName}: ${fp}`;
+  }
+  return String(toolName);
+}
+
+function makeImageBlocks(images: string[]): any[] {
+  const blocks: any[] = [];
+  for (const a of images) {
+    try {
+      const data = readFileSync(a).toString("base64");
+      const media = guessMime(a) || "image/png";
+      blocks.push({ type: "image", source: { type: "base64", media_type: media, data } });
+    } catch (e) {
+      log.warn("读取图片失败 %s: %s", a, (e as Error).message);
+    }
+  }
+  return blocks;
+}
+
+function userStream(text: string, imageBlocks: any[]): AsyncIterable<unknown> {
+  return (async function* gen() {
+    yield {
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text }, ...imageBlocks] },
+      parent_tool_use_id: null,
+    };
+  })();
+}
+
+function buildPrompt(text: string, others: string[], images: string[], workspace: string): string {
+  const out: string[] = [`（你的工作目录是 ${workspace}；不确定路径时先用 pwd/ls 确认，不要凭记忆回答路径。）`];
+  out.push(text || "(用户发来了附件)");
+  if (images.length) out.push("(用户发来了图片，见下方消息内容。)");
+  if (others.length) {
+    const names = others.map(a => basename(a)).join(", ");
+    out.push(`(非图片附件已放在工作目录 inbox/ 下：${names}，可用 Read 工具读取。)`);
+  }
+  return out.join("\n");
+}
