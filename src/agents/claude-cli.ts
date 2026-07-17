@@ -2,6 +2,9 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { getLogger } from "../logger.ts";
+
+const log = getLogger("agent:claude-cli");
 
 function expandHome(path: string): string {
   if (path === "~") return homedir();
@@ -20,24 +23,25 @@ function usableFile(path: string | undefined | null): string | null {
     const native = join(binDir, "claude.exe");
     if (existsSync(native)) return native;
     const npmCli = join(binDir, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+    log.debug("claude.cmd 解析: binDir=%s, cli.js=%s, exists=%s", binDir, npmCli, existsSync(npmCli));
     if (existsSync(npmCli)) return npmCli;
     return null;
   }
   // Windows 上无扩展名的 "claude" 是 npm shell wrapper，SDK 无法直接 spawn
-  // 优先找同目录的 claude.exe 或 claude.cmd
+  // 依次尝试：claude.exe → claude.cmd 解析 → cli.js → 放行（scoop 等真二进制）
   if (process.platform === "win32" && ext === "") {
     const binDir = dirname(full);
+    // 1. 同目录有 claude.exe（独立安装器）
     const exe = join(binDir, "claude.exe");
     if (existsSync(exe)) return exe;
+    // 2. 同目录有 claude.cmd（npm 安装）→ 解析出 cli.js
     const cmd = join(binDir, "claude.cmd");
     if (existsSync(cmd)) {
-      const native = join(binDir, "claude.exe");
-      if (existsSync(native)) return native;
       const npmCli = join(binDir, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
       if (existsSync(npmCli)) return npmCli;
       return null;
     }
-    // 如果既没有 .exe 也没有 .cmd，可能是真正无扩展名的二进制（如 scoop 安装），放行
+    // 3. 既没有 .exe 也没有 .cmd，可能是真正无扩展名的二进制（如 scoop），放行
   }
   return full;
 }
@@ -75,8 +79,12 @@ export function resolveClaudeCliPath(configured?: string | null): string | null 
     : [join(home, ".local", "bin", "claude"), "/usr/local/bin/claude", "/usr/bin/claude"];
 
   for (const candidate of candidates) {
+    if (!candidate) continue;
     const path = usableFile(candidate);
+    log.debug("候选: %s → %s", candidate, path ?? "(null)");
     if (path) return path;
   }
-  return findOnPath();
+  const pathResult = findOnPath();
+  log.debug("findOnPath → %s", pathResult ?? "(null)");
+  return pathResult;
 }
