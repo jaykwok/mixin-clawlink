@@ -331,6 +331,8 @@ export class MessagePipe {
       return null;
     }
     log.info("下载取址成功: fileUrl=%s", fileUrl);
+    // 打印完整响应字段，便于诊断预签名 URL 签名无效等问题
+    log.info("下载取址完整响应: %s", JSON.stringify(info));
 
     // S3 预签名 URL 路径中可能有多余斜杠（如 host//chat 或 .../im-chat-attachment//chatAttachment），
     // S3 签名计算时路径会被规范化为单斜杠，导致 SignatureDoesNotMatch。
