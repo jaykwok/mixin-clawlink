@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -20,8 +20,19 @@ function usableFile(path: string | undefined | null): string | null {
   const ext = extname(full).toLowerCase();
   if (ext === ".cmd" || ext === ".ps1") {
     const binDir = dirname(full);
+    // 1. 同目录有 claude.exe（独立安装器）
     const native = join(binDir, "claude.exe");
     if (existsSync(native)) return native;
+    // 2. 读 .cmd 内容解析 cli.js 路径（npm 安装的 wrapper 脚本里有 node "path/to/cli.js"）
+    try {
+      const content = readFileSync(full, "utf8");
+      const m = content.match(/"([^"]+cli\.js)"/);
+      if (m && existsSync(m[1])) {
+        log.debug("从 %s 解析出 cli.js: %s", extname(full), m[1]);
+        return m[1];
+      }
+    } catch { /* ignore */ }
+    // 3. 猜测标准 npm 路径
     const npmCli = join(binDir, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
     log.debug("claude.cmd 解析: binDir=%s, cli.js=%s, exists=%s", binDir, npmCli, existsSync(npmCli));
     if (existsSync(npmCli)) return npmCli;
@@ -34,9 +45,17 @@ function usableFile(path: string | undefined | null): string | null {
     // 1. 同目录有 claude.exe（独立安装器）
     const exe = join(binDir, "claude.exe");
     if (existsSync(exe)) return exe;
-    // 2. 同目录有 claude.cmd（npm 安装）→ 解析出 cli.js
+    // 2. 同目录有 claude.cmd（npm 安装）→ 读 cmd 解析 cli.js
     const cmd = join(binDir, "claude.cmd");
     if (existsSync(cmd)) {
+      try {
+        const content = readFileSync(cmd, "utf8");
+        const m = content.match(/"([^"]+cli\.js)"/);
+        if (m && existsSync(m[1])) {
+          log.debug("从 claude.cmd 解析出 cli.js: %s", m[1]);
+          return m[1];
+        }
+      } catch { /* ignore */ }
       const npmCli = join(binDir, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
       if (existsSync(npmCli)) return npmCli;
       return null;
