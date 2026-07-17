@@ -330,7 +330,7 @@ export class MessagePipe {
       log.error("下载取址未返回 fileUrl: %s", JSON.stringify(info));
       return null;
     }
-    log.info("下载取址成功: fileUrl=%s", fileUrl.slice(0, 120));
+    log.info("下载取址成功: fileUrl=%s", fileUrl);
 
     // fileUrl 是 MinIO/S3 预签名 URL（含 X-Amz 参数）
     // Node.js fetch 会自动加 Accept-Encoding 等 header，可能干扰 S3 签名验证
@@ -366,9 +366,13 @@ function downloadPresignedUrl(url: string): Promise<Buffer | null> {
         return;
       }
       if (resp.statusCode !== 200) {
-        log.error("https.get 下载失败: HTTP %d", resp.statusCode);
-        resp.resume();
-        resolve(null);
+        const body: Buffer[] = [];
+        resp.on("data", (c: Buffer) => body.push(c));
+        resp.on("end", () => {
+          const errText = Buffer.concat(body).toString("utf8").slice(0, 500);
+          log.error("https.get 下载失败: HTTP %d | body: %s", resp.statusCode, errText);
+          resolve(null);
+        });
         return;
       }
       const chunks: Buffer[] = [];
