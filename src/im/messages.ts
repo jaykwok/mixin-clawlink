@@ -318,7 +318,8 @@ export class MessagePipe {
       log.error("下载取址网络错误: %s", (e as Error).message);
       return null;
     }
-    if (resp.status !== 200) {
+    // 官方插件允许 302（parseResponse: !response.ok && status !== 302）
+    if (!resp.ok && resp.status !== 302) {
       log.error("下载取址 HTTP %d", resp.status);
       return null;
     }
@@ -328,16 +329,38 @@ export class MessagePipe {
       log.error("下载取址未返回 fileUrl: %s", JSON.stringify(info));
       return null;
     }
-    let fresp: Response;
-    try {
-      fresp = await fetch(fileUrl, { // 预签名 URL，无需鉴权
-        signal: AbortSignal.timeout(cfg.HTTP_TIMEOUT * 1000),
-      });
-      if (!fresp.ok) throw new Error(`HTTP ${fresp.status}`);
-    } catch (e) {
-      log.error("下载文件网络错误: %s", (e as Error).message);
+
+    // fileUrl 下载：逐步升级 header 策略
+    // 1) 裸 fetch（预签名 URL 理论上无需鉴权）
+    // 2) 加 User-Agent（很多 OSS/CDN 拒绝无 UA 的请求 → 403）
+    // 3) 加 User-Agent + Bearer token（某些后端 fileUrl 是内部端点）
+    const UA = "Mixin-ClawLink/1.0";
+    const fetchOpts = (headers: Record<string, string>): RequestInit => ({
+      headers,
+      signal: AbortSignal.timeout(cfg.HTTP_TIMEOUT * 1000),
+    });
+    const strategies: { label: string; opts: RequestInit }[] = [
+      { label: "裸 fetch", opts: fetchOpts({}) },
+      { label: "加 User-Agent", opts: fetchOpts({ "User-Agent": UA }) },
+      { label: "加 UA + Bearer", opts: fetchOpts({ "User-Agent": UA, Authorization: `Bearer ${token}` }) },
+    ];
+
+    let fresp: Response | null = null;
+    for (const s of strategies) {
+      try {
+        fresp = await fetch(fileUrl, s.opts);
+        if (fresp.ok) break;
+        log.warn("下载文件 %s 失败: HTTP %d", s.label, fresp.status);
+        fresp = null;
+      } catch (e) {
+        log.warn("下载文件 %s 网络错误: %s", s.label, (e as Error).message);
+      }
+    }
+    if (!fresp || !fresp.ok) {
+      log.error("下载文件最终失败（已尝试 %d 种策略）", strategies.length);
       return null;
     }
+
     const buf = Buffer.from(await fresp.arrayBuffer());
     const name = info.fileName ?? fileId;
     const mime = info.mimeType ?? "application/octet-stream";

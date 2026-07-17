@@ -10,9 +10,11 @@
  * 响应形态支持 {data:[{id,display_name}],has_more,last_id}、数组、或字符串数组。
  * 若后端没有模型列表端点，上层仍允许用 /model <名字> 手填。
  */
+import { spawnSync } from "node:child_process";
 import { cfg } from "../config.ts";
 import { getLogger } from "../logger.ts";
 import { readClaudeEnv } from "./claude-settings.ts";
+import { resolveAgyCliPath } from "./agy-cli.ts";
 
 const log = getLogger("models");
 
@@ -106,4 +108,46 @@ export async function fetchModels(): Promise<ModelInfo[]> {
     }
   }
   throw new Error(`模型列表拉取失败：${errors.join("；")}（仍可用 /model <名字> 手填）`);
+}
+
+/**
+ * 从 agy CLI 获取模型列表（spawn `agy models`，解析纯文本输出）。
+ * agy models 输出每行一个模型名（如 "Gemini 3.5 Flash (Medium)"），无 JSON。
+ */
+export function fetchAgyModels(): ModelInfo[] {
+  const cliPath = resolveAgyCliPath(cfg.AGY_CLI_PATH);
+  if (!cliPath) {
+    throw new Error("未找到 agy CLI（可设置 AGY_CLI_PATH 或确保 agy 在 PATH 中）");
+  }
+  const r = spawnSync(cliPath, ["models"], {
+    encoding: "utf8",
+    timeout: 15_000,
+    windowsHide: true,
+    shell: false,
+  });
+  if (r.error) throw new Error(`agy models 执行失败: ${(r.error as Error).message}`);
+  if (r.status !== 0 && !r.stdout) {
+    const detail = (r.stderr || "").trim().slice(0, 200);
+    throw new Error(`agy models 退出码 ${r.status}${detail ? `: ${detail}` : ""}`);
+  }
+  const out = (r.stdout || "").trim();
+  if (!out) throw new Error("agy models 返回空输出");
+  const lines = out.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const list: ModelInfo[] = lines.map(name => ({ id: name, name }));
+  log.info("agy models 返回 %d 个模型: %s", list.length, lines.join(", "));
+  if (!list.length) throw new Error("agy models 未返回任何模型");
+  return list;
+}
+
+/**
+ * 统一入口：根据当前 agent 类型分发到对应的模型获取方法。
+ * - claude → fetchModels()（Anthropic/OpenAI 网关）
+ * - antigravity/agy → fetchAgyModels()（agy models 子进程）
+ */
+export async function fetchAgentModels(): Promise<ModelInfo[]> {
+  const agent = cfg.AGENT.toLowerCase();
+  if (agent === "antigravity" || agent === "agy") {
+    return fetchAgyModels();
+  }
+  return fetchModels();
 }

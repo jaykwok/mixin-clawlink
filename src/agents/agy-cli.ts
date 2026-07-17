@@ -51,14 +51,49 @@ export function resolveAgyCliPath(configured?: string | null): string | null {
   return findOnPath();
 }
 
+/** agy 配置/数据目录。 */
+function agyDataDir(): string {
+  return resolve(homedir(), ".gemini", "antigravity-cli");
+}
+
 /** agy 会话存储目录。 */
 function conversationsDir(): string {
-  return resolve(homedir(), ".gemini", "antigravity-cli", "conversations");
+  return resolve(agyDataDir(), "conversations");
 }
 
 /** agy workspace→conversation 缓存文件路径。 */
 function lastConversationsCachePath(): string {
-  return resolve(homedir(), ".gemini", "antigravity-cli", "cache", "last_conversations.json");
+  return resolve(agyDataDir(), "cache", "last_conversations.json");
+}
+
+/**
+ * 检测 agy 是否已完成 OAuth 认证。
+ * agy 登录后会在 ~/.gemini/antigravity-cli/ 下存放认证凭据文件。
+ * 常见文件：credentials.json / auth.json / .credentials/ 等。
+ * 如果这些文件都不存在，说明用户尚未完成首次浏览器登录。
+ */
+export function isAgyAuthenticated(): boolean {
+  const dataDir = agyDataDir();
+  if (!existsSync(dataDir)) return false;
+  // 检查常见认证凭据文件
+  const authFiles = ["credentials.json", "auth.json", "token.json", ".credentials"];
+  for (const f of authFiles) {
+    if (existsSync(resolve(dataDir, f))) return true;
+  }
+  // 检查 .credentials 子目录
+  const credDir = resolve(dataDir, ".credentials");
+  if (existsSync(credDir)) {
+    try {
+      const entries = readdirSync(credDir);
+      if (entries.length > 0) return true;
+    } catch { /* 忽略 */ }
+  }
+  // 如果 conversations 目录有 .db 文件，说明之前跑过（间接说明已认证过）
+  try {
+    const entries = readdirSync(conversationsDir());
+    if (entries.some(n => extname(n).toLowerCase() === ".db")) return true;
+  } catch { /* 忽略 */ }
+  return false;
 }
 
 /**

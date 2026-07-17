@@ -18,7 +18,7 @@ import { spawn } from "node:child_process";
 import { cfg } from "../config.ts";
 import { getLogger } from "../logger.ts";
 import type { Agent, ReplyOpts, ReplyResult } from "./base.ts";
-import { resolveAgyCliPath, latestConversationId, detectAgyVersion, cmpVersion } from "./agy-cli.ts";
+import { resolveAgyCliPath, latestConversationId, detectAgyVersion, cmpVersion, isAgyAuthenticated } from "./agy-cli.ts";
 
 const log = getLogger("agent:agy");
 const IMG_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
@@ -49,6 +49,12 @@ export class AgyAgent implements Agent {
       }
     } else {
       log.info("使用本机 agy CLI: %s (版本探测失败，按最新版行为处理)", path);
+    }
+
+    // 认证检测：agy 需要浏览器 OAuth 登录，headless 模式下无法完成
+    if (!isAgyAuthenticated()) {
+      log.warn("agy 似乎尚未完成 OAuth 认证（~/.gemini/antigravity-cli/ 下未找到凭据）");
+      log.warn("请在终端中手动运行一次 agy（非 headless）完成 Google 账号登录，否则 --print 会卡在认证流程直到超时");
     }
   }
   async shutdown(): Promise<void> {}
@@ -84,6 +90,15 @@ export class AgyAgent implements Agent {
     }
 
     if (resultText === null) {
+      // 识别认证类错误，给出明确提示
+      const errMsg = lastErr?.message ?? "";
+      if (/auth|oauth|accounts\.google\.com|credential|login|登录|认证/i.test(errMsg)) {
+        throw new Error(
+          `agy 认证失败：headless 模式下无法完成浏览器 OAuth 登录。\n` +
+          `请在终端中手动运行一次 agy（非 headless）完成 Google 账号登录，然后重试。\n` +
+          `原始错误: ${errMsg}`
+        );
+      }
       throw lastErr ?? new Error("agy 执行失败（未知原因）");
     }
 
@@ -174,6 +189,15 @@ function runAgyPrint(
 
       if (code !== 0) {
         const detail = stderr || `退出码 ${code}` + (signal ? ` (signal ${signal})` : "");
+        // 认证类错误特别标注
+        if (/auth|oauth|accounts\.google\.com|credential|login|token/i.test(detail)) {
+          const err = new Error(
+            `agy 认证相关错误: ${detail}\n` +
+            `（headless 模式下无法完成浏览器 OAuth，请在终端手动运行 agy 登录）`
+          );
+          finish(err);
+          return;
+        }
         finish(new Error(`agy 执行失败: ${detail}`));
         return;
       }

@@ -16,7 +16,7 @@ import { execFile } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { cfg, reload, setValue, writeEnvRaw } from "../config.ts";
 import { setSuppressConsole, subscribeConsole } from "../logger.ts";
-import { fetchModels } from "../agents/models.ts";
+import { fetchAgentModels } from "../agents/models.ts";
 import { registry } from "../session/registry.ts";
 import { getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 import type { Bot } from "../bot.ts";
@@ -56,6 +56,7 @@ const [terminalSize, setTerminalSize] = createSignal({ width: process.stdout.col
 const [fIdx, setFIdx] = createSignal(0);
 const [draft, setDraft] = createSignal("");
 const [wizardFocus, setWizardFocus] = createSignal<"fields" | "editor">("fields");
+const [workspaceConfirm, setWorkspaceConfirm] = createSignal(false);
 // 会话视图
 const [users, setUsers] = createSignal<string[]>([]);
 const [selUser, setSelUser] = createSignal(0);
@@ -94,7 +95,7 @@ const WIZARD_FIELDS: WField[] = [
   { label: "APP_SECRET（必填）", get: () => cfg.APP_SECRET, set: v => writeEnvRaw("MIXIN_APP_SECRET", v) },
   { label: "ENV（production/staging/impre/test）", get: () => cfg.ENV, set: v => writeEnvRaw("MIXIN_ENV", v), choices: ["production", "staging", "impre", "test"] },
   { label: "AGENT（echo/claude/antigravity）", get: () => cfg.AGENT, set: v => setValue("AGENT", v), choices: ["echo", "claude", "antigravity"] },
-  { label: "WORKSPACE 工作目录", get: () => cfg.WORKSPACE, set: v => setValue("WORKSPACE", v) },
+  { label: "WORKSPACE 工作目录（agent 操作文件的根目录，必填）", get: () => cfg.WORKSPACE, set: v => setValue("WORKSPACE", v) },
   { label: "SYSTEM_PROMPT 系统提示词", get: () => cfg.SYSTEM_PROMPT, set: v => setValue("SYSTEM_PROMPT", v) },
   { label: "CLAUDE_MODEL（留空=默认）", get: () => cfg.CLAUDE_MODEL ?? "", set: v => setValue("CLAUDE_MODEL", v) },
   { label: "ALLOWED_TOOLS（逗号分隔）", get: () => cfg.CLAUDE_ALLOWED_TOOLS.join(","), set: v => setValue("CLAUDE_ALLOWED_TOOLS", v) },
@@ -120,8 +121,8 @@ function enterWizardEditor(): void {
   replaceOnFirstEdit = true;
   setWizardFocus("editor");
   setStatusMsg(WIZARD_FIELDS[fIdx()].choices?.length
-    ? "已进入选项框；用 ↑/↓ 选择，按 Enter 保存并返回列表"
-    : "已进入编辑框；原值已选中，直接输入或 Ctrl+V 会替换，Enter 保存返回");
+    ? "已进入选项模式：用 ↑/↓ 选择，按 Enter 保存并返回字段列表"
+    : "已进入编辑模式：原值已选中，直接输入会替换；Ctrl+V 粘贴；按 Enter 保存并返回字段列表");
 }
 
 function moveWizardChoice(direction: 1 | -1): void {
@@ -202,6 +203,18 @@ function commitField(): boolean {
   catch (e) { setStatusMsg(`⚠️ ${(e as Error).message}`); return false; }
 }
 function finalizeWizard(): void {
+  // 工作目录为空时弹确认：是否使用默认 ./workspace
+  if (!workspaceConfirm() && !cfg.WORKSPACE.trim()) {
+    setWorkspaceConfirm(true);
+    setStatusMsg("⚠️ 工作目录为空。按 Enter 使用默认 ./workspace，或 Esc 返回填写");
+    return;
+  }
+  if (workspaceConfirm()) {
+    // 用户确认使用默认值
+    try { setValue("WORKSPACE", "./workspace"); }
+    catch (e) { setStatusMsg(`⚠️ ${(e as Error).message}`); setWorkspaceConfirm(false); return; }
+    setWorkspaceConfirm(false);
+  }
   if (!commitField()) return;
   if (!cfg.APP_ID || !cfg.APP_SECRET) { setStatusMsg("❌ APP_ID / APP_SECRET 不能为空，无法启动"); return; }
   if (wizardFromPanel) {
@@ -248,9 +261,10 @@ async function refreshUsers(): Promise<void> {
 async function actionPickModel(): Promise<void> {
   setStatusMsg("拉取模型列表…");
   try {
-    const ms = await fetchModels();
+    const ms = await fetchAgentModels();
     setModelList(ms.map(m => m.id)); setSelAct(0); setModelPick(true);
-    setStatusMsg(`拉到 ${ms.length} 个模型（数字或 Enter 确认 / Esc 返回）`);
+    const src = (cfg.AGENT.toLowerCase() === "antigravity" || cfg.AGENT.toLowerCase() === "agy") ? "agy models" : "Claude /models";
+    setStatusMsg(`拉到 ${ms.length} 个模型（数字或 Enter 确认 / Esc 返回）· 来源: ${src}`);
   } catch (e) { setStatusMsg(`⚠️ ${(e as Error).message}（可改用 IM 里 /model <名字>）`); }
 }
 function actionReboot(): void {
@@ -269,7 +283,7 @@ async function sendTestToSelected(): Promise<void> {
 }
 const ACTION_LIST: { label: string; detail: string; run: () => void | Promise<void> }[] = [
   { label: "编辑配置", detail: "读取并修改现有 .env", run: openConfigEditor },
-  { label: "选择模型", detail: "从当前 Claude 后端拉取", run: actionPickModel },
+  { label: "选择模型", detail: "从当前 agent 后端拉取", run: actionPickModel },
   { label: "刷新状态", detail: "刷新用户、会话与连接状态", run: async () => { await refreshUsers(); setStatusMsg("已刷新"); } },
   { label: "软重启", detail: "重读 .env 并重建 Agent / WS", run: actionReboot },
   { label: "退出", detail: "安全停止 Mixin ClawLink", run: () => quitFn() },
@@ -344,6 +358,23 @@ function handleKey(key: KeyEvent): void {
 }
 
 function handleWizardKey(name: string, seq: string, shift: boolean): void {
+  // 工作目录空值确认模式
+  if (workspaceConfirm()) {
+    if (name === "return" || name === "enter") {
+      // 确认使用默认 ./workspace，继续 finalize
+      finalizeWizard();
+      return;
+    }
+    if (name === "escape") {
+      setWorkspaceConfirm(false);
+      setStatusMsg("已取消；请填写工作目录后再按 Ctrl+S 保存");
+      // 跳到 WORKSPACE 字段
+      const wsIdx = WIZARD_FIELDS.findIndex(f => f.label.startsWith("WORKSPACE"));
+      if (wsIdx >= 0) selectWizardField(wsIdx);
+      return;
+    }
+    return; // 锁定其他按键
+  }
   if (name === "escape") {
     if (wizardFocus() === "editor") {
       setDraft(WIZARD_FIELDS[fIdx()].get());
@@ -530,7 +561,9 @@ async function activatePanel(indexOverride?: number): Promise<void> {
     if (modelPick()) {
       const id = modelList()[activeIndex];
       if (!id) return;
-      try { setValue("CLAUDE_MODEL", id); setStatusMsg(`✅ 模型 → ${id}（下条消息生效）`); }
+      const isAgy = cfg.AGENT.toLowerCase() === "antigravity" || cfg.AGENT.toLowerCase() === "agy";
+      const modelKey = isAgy ? "AGY_MODEL" : "CLAUDE_MODEL";
+      try { setValue(modelKey, id); setStatusMsg(`✅ 模型 → ${id}（下条消息生效）`); }
       catch (e) { setStatusMsg(`⚠️ ${(e as Error).message}`); }
       refreshActions();
     } else {
@@ -678,7 +711,7 @@ function ActionsView() {
   const visible = () => list().slice(page().start, page().end);
   const title = () => (modelPick() ? " 模型目录 " : " 快捷操作 ");
   const detail = () => modelPick()
-    ? "选择后写入 CLAUDE_MODEL\n下条消息生效\n\n来源：Claude /models"
+    ? `选择后写入 ${(() => { const isAgy = cfg.AGENT.toLowerCase() === "antigravity" || cfg.AGENT.toLowerCase() === "agy"; return isAgy ? "AGY_MODEL" : "CLAUDE_MODEL"; })()}\n下条消息生效\n\n来源：${(() => { const isAgy = cfg.AGENT.toLowerCase() === "antigravity" || cfg.AGENT.toLowerCase() === "agy"; return isAgy ? "agy models" : "Claude /models"; })()}`
     : `${ACTION_LIST[selAct()]?.label ?? "—"}\n\n${ACTION_LIST[selAct()]?.detail ?? "请选择一项操作"}`;
   return (
     <box width="100%" height="100%" flexGrow={1} flexBasis={0} flexDirection="row" gap={1}>
@@ -703,15 +736,15 @@ function ActionsView() {
 function hints(): string {
   const compact = terminalSize().width < 100;
   if (compact && mode() === "wizard") return wizardFocus() === "fields"
-    ? "Enter 编辑 · ↑↓/1-9 选择 · PgUp/Dn 翻页 · Esc 返回"
+    ? "Enter 进入编辑 · ↑↓/1-9 选择 · PgUp/Dn 翻页 · Esc 返回"
     : WIZARD_FIELDS[fIdx()].choices?.length ? "↑↓ 选择 · Enter 保存 · Esc 放弃" : "输入/Ctrl+V 编辑 · Enter 保存 · Esc 放弃";
   if (compact && view() === "logs") return "Tab/←→ 切视图 · Ctrl+B 后台 · q 退出";
   if (compact) return "1-9 执行 · ↑↓ 选择 · PgUp/Dn 翻页 · Esc 返回";
   if (mode() === "wizard") return wizardFocus() === "fields"
-    ? `Enter 进入编辑 · ↑↓/1-9 选择 · PgUp/Dn 翻页 · Ctrl+S ${wizardFromPanel ? "完成" : "保存启动"} · Esc 返回`
+    ? `选中字段后按 Enter 进入编辑 · ↑↓/1-9 选择字段 · PgUp/Dn 翻页 · Ctrl+S ${wizardFromPanel ? "完成" : "保存启动"} · Esc 返回`
     : WIZARD_FIELDS[fIdx()].choices?.length
-      ? "↑↓/←→ 切换选项 · Enter 保存返回 · Esc 放弃"
-      : "输入/Ctrl+V 编辑 · Enter 保存返回 · Esc 放弃";
+      ? "↑↓/←→ 切换选项 · Enter 保存返回字段列表 · Esc 放弃编辑"
+      : "直接输入或 Ctrl+V 粘贴 · Enter 保存返回字段列表 · Esc 放弃编辑";
   if (view() === "logs") return "Tab/←→ 切换视图 · Ctrl+B 托盘后台 · q/Ctrl+C 退出";
   if (view() === "sessions") {
     const f = sessionFocus();
@@ -757,7 +790,7 @@ function WizardView() {
           })}
         </box>
         <box flexGrow={1} flexShrink={1} flexBasis={0} border borderColor={wizardFocus() === "editor" ? C.accent : C.border} backgroundColor={C.raised} title=" 当前值 " titleColor={wizardFocus() === "editor" ? C.accent : C.dim} flexDirection="column">
-          <text fg={wizardFocus() === "editor" ? C.cyan : C.subtle} wrapMode="none" truncate> {wizardFocus() === "editor" ? (current().choices?.length ? "SELECTING · ↑/↓ · Enter 保存" : "EDITING · Enter 保存 · Ctrl+V 粘贴") : "READY · Enter 编辑"}</text>
+          <text fg={wizardFocus() === "editor" ? C.cyan : C.subtle} wrapMode="none" truncate> {wizardFocus() === "editor" ? (current().choices?.length ? "选项模式 · ↑/↓ 选择 · Enter 保存" : "编辑模式 · 输入/Ctrl+V · Enter 保存") : "待编辑 · 按 Enter 进入编辑"}</text>
           <text fg={C.faint}> FIELD</text>
           <box width="100%" height={2} flexShrink={0} overflow="hidden"><text fg={C.text} wrapMode="word" truncate> {current().label}</text></box>
           {wizardFocus() === "editor" && current().choices?.length ? (
@@ -777,7 +810,7 @@ function WizardView() {
               <box width="100%" height={3} flexShrink={0} overflow="hidden" border borderColor={wizardFocus() === "editor" ? C.cyan : C.borderSoft} backgroundColor={C.input}>
                 <text fg={draft() ? C.green : C.subtle} wrapMode="none" truncate> {draft() ? tailWindow(draft(), Math.max(12, Math.floor(terminalSize().width / 2) - 8)) : "（空值；按 Enter 进入编辑）"}</text>
               </box>
-              {current().choices?.length ? <text fg={C.subtle} wrapMode="none" truncate> 候选项：按 Enter 展开选择框</text> : <text fg={C.subtle}> 文本字段 · Enter 后输入</text>}
+              {current().choices?.length ? <text fg={C.subtle} wrapMode="none" truncate> 候选项：按 Enter 展开选择框</text> : <text fg={C.subtle}> 文本字段 · 按 Enter 后输入或粘贴</text>}
             </>
           )}
         </box>

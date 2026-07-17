@@ -267,8 +267,10 @@ export function setValue(key: string, raw: string): string {
     if (!toks.length) throw new Error(`${key} 至少要有一个工具`);
     normalized = toks.join(",");
   } else if (e.kind === "path") {
-    if (!val) throw new Error(`${key} 不能为空`);
-    normalized = resolve(expandHome(val));
+    if (!val) throw new Error(`${key} 不能为空（工作目录是 agent 读写文件的根目录，必须指定）`);
+    // 跨平台路径规范化：展开 ~ → 统一正斜杠 → resolve 成绝对路径
+    // Windows 反斜杠、Unix 正斜杠、相对路径、~ 家目录均支持
+    normalized = resolve(expandHome(val.replace(/\\/g, "/")));
   } else {
     // str
     if (!val && !e.allowEmpty) throw new Error(`${key} 不能为空`);

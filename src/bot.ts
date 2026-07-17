@@ -10,7 +10,7 @@ import { checkCredentials, cfg, EDITABLE, getValue, lookup, setValue } from "./c
 import { expandHome } from "./config.ts";
 import { makeAgent } from "./agents/index.ts";
 import type { Agent } from "./agents/base.ts";
-import { fetchModels, type ModelInfo } from "./agents/models.ts";
+import { fetchAgentModels, type ModelInfo } from "./agents/models.ts";
 import { TokenManager } from "./im/auth.ts";
 import { MessagePipe } from "./im/messages.ts";
 import type { InboundMessage } from "./im/messages.ts";
@@ -32,7 +32,7 @@ const COMMANDS: Record<string, string> = {
   "/reset": "清空当前会话的对话记录",
   "/del": "删除会话：/del 1 或 /del 1,3",
   "/config": "查看/修改配置：/config 或 /config <编号|名称> <值>",
-  "/model": "查看/选择 Claude 模型：/model 或 /model <编号|名称>，/model default 用默认",
+  "/model": "查看/选择模型：/model 或 /model <编号|名称>，/model default 用默认",
   "/reboot": "软重启（重读 .env、重建 agent/WS）",
   "/stop": "停止当前正在执行的任务",
   "/cwd": "查看/切换工作目录：/cwd 或 /cwd <绝对路径|相对根目录>",
@@ -256,32 +256,35 @@ export class Bot {
     }
   }
 
-  /** /model：从用户的 CC 网关拉模型列表，编号选（仿 /use）；拉不到允许手填。 */
+  /** /model：按 agent 类型从对应来源拉模型列表，编号选（仿 /use）；拉不到允许手填。 */
   private async handleModel(uid: string, text: string): Promise<void> {
     const send = (s: string) => this.pipe.sendText(uid, s);
     const arg = text.slice(text.indexOf(" ") >= 0 ? text.indexOf(" ") + 1 : text.length).trim();
-    const cur = cfg.CLAUDE_MODEL;
+    const isAgy = cfg.AGENT.toLowerCase() === "antigravity" || cfg.AGENT.toLowerCase() === "agy";
+    const modelKey = isAgy ? "AGY_MODEL" : "CLAUDE_MODEL";
+    const cur = isAgy ? cfg.AGY_MODEL : cfg.CLAUDE_MODEL;
+    const sourceLabel = isAgy ? "agy models" : "Claude Code 网关";
 
     if (!arg) {
       try {
-        await send(fmtModels(await fetchModels(), cur));
+        await send(fmtModels(await fetchAgentModels(), cur, sourceLabel));
       } catch (e) {
         await send(`⚠️ 拉不到模型列表: ${(e as Error).message}\n可直接 /model <模型名> 指定，或 /model default 用默认。`);
       }
       return;
     }
     if (arg.toLowerCase() === "default" || arg === "默认") {
-      setValue("CLAUDE_MODEL", "");
+      setValue(modelKey, "");
       await send("✅ 已切回默认模型（下条消息生效）。");
       return;
     }
     if (/^\d+$/.test(arg)) {
       const n = parseInt(arg, 10);
       try {
-        const models = await fetchModels();
+        const models = await fetchAgentModels();
         const m = models[n - 1];
         if (!m) { await send(`⚠️ 没有第 ${n} 个模型，/model 看列表。`); return; }
-        setValue("CLAUDE_MODEL", m.id);
+        setValue(modelKey, m.id);
         await send(`✅ 模型已切到 ${m.id}（下条消息生效）。`);
       } catch (e) {
         await send(`⚠️ 拉不到模型列表: ${(e as Error).message}\n可直接 /model <模型名> 指定。`);
@@ -290,7 +293,7 @@ export class Bot {
     }
     // 自由名兜底
     try {
-      setValue("CLAUDE_MODEL", arg);
+      setValue(modelKey, arg);
       await send(`✅ 模型已切到 ${arg}（下条消息生效）。`);
     } catch (e) {
       await send(`⚠️ ${(e as Error).message}`);
@@ -480,8 +483,8 @@ function fmtConfig(): string {
   return lines.join("\n");
 }
 
-function fmtModels(models: ModelInfo[], current: string | null): string {
-  const lines = ["模型列表（来自你的 Claude Code 网关）:"];
+function fmtModels(models: ModelInfo[], current: string | null, sourceLabel: string): string {
+  const lines = [`模型列表（来自 ${sourceLabel}）:`];
   models.forEach((m, i) => {
     const mark = m.id === current ? " ← 当前" : "";
     const label = m.name && m.name !== m.id ? `${m.id}（${m.name}）` : m.id;
