@@ -93,7 +93,7 @@ const WIZARD_FIELDS: WField[] = [
   { label: "APP_ID（密信智能助理 apikey，必填）", get: () => cfg.APP_ID, set: v => writeEnvRaw("MIXIN_APP_ID", v) },
   { label: "APP_SECRET（必填）", get: () => cfg.APP_SECRET, set: v => writeEnvRaw("MIXIN_APP_SECRET", v) },
   { label: "ENV（production/staging/impre/test）", get: () => cfg.ENV, set: v => writeEnvRaw("MIXIN_ENV", v), choices: ["production", "staging", "impre", "test"] },
-  { label: "AGENT（echo/claude）", get: () => cfg.AGENT, set: v => setValue("AGENT", v), choices: ["echo", "claude"] },
+  { label: "AGENT（echo/claude/antigravity）", get: () => cfg.AGENT, set: v => setValue("AGENT", v), choices: ["echo", "claude", "antigravity"] },
   { label: "WORKSPACE 工作目录", get: () => cfg.WORKSPACE, set: v => setValue("WORKSPACE", v) },
   { label: "SYSTEM_PROMPT 系统提示词", get: () => cfg.SYSTEM_PROMPT, set: v => setValue("SYSTEM_PROMPT", v) },
   { label: "CLAUDE_MODEL（留空=默认）", get: () => cfg.CLAUDE_MODEL ?? "", set: v => setValue("CLAUDE_MODEL", v) },
@@ -445,6 +445,11 @@ async function activateNumberedPanelItem(digit: number): Promise<void> {
 
 async function loadSessionHistory(uid: string, sessionNum: number): Promise<void> {
   try {
+    // agy 无 SDK 拉历史，降级提示
+    if (cfg.AGENT === "antigravity") {
+      setSessionHistory("（agy CLI 模式不支持拉取对话历史；会话续接靠 --conversation <uuid>，历史存在 ~/.gemini/antigravity-cli/conversations/）");
+      return;
+    }
     const sid = await registry.getSessionIdByNum(uid, sessionNum);
     if (!sid) { setSessionHistory("（该会话尚无 Claude session_id，发一条消息后才会产生）"); return; }
     const msgs = await getSessionMessages(sid, { limit: 50 });

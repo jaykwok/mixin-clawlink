@@ -60,6 +60,11 @@ export interface Cfg {
   MAX_FILE_MB: number;
   CLAUDE_DANGER_CONFIRM: boolean;
   CLAUDE_DANGER_PATTERNS: string[]; // 正则源串（isDangerous 时编译）
+  // agy CLI 适配器配置（AGENT=agy 时生效）
+  AGY_CLI_PATH: string | null;
+  AGY_MODEL: string | null;
+  AGY_AGENT: string | null;
+  AGY_MODE: "default" | "accept-edits" | "plan" | null;
   // 运维参数（非 env 派生，不参与热改；改了需重启进程）
   HTTP_TIMEOUT: number;
   TOKEN_REFRESH_LEAD_S: number;
@@ -92,6 +97,10 @@ export const cfg: Cfg = {
   MAX_FILE_MB: 30,
   CLAUDE_DANGER_CONFIRM: true,
   CLAUDE_DANGER_PATTERNS: [],
+  AGY_CLI_PATH: null,
+  AGY_MODEL: null,
+  AGY_AGENT: null,
+  AGY_MODE: null,
   HTTP_TIMEOUT: 30,
   TOKEN_REFRESH_LEAD_S: 60,
   WS_PING_INTERVAL_S: 30,
@@ -144,6 +153,14 @@ function apply(): void {
   cfg.CLAUDE_DANGER_CONFIRM = ["1", "true", "yes", "on"].includes(envStr("MIXIN_CLAUDE_DANGER_CONFIRM", "1").trim().toLowerCase());
   const pats = envStr("MIXIN_CLAUDE_DANGER_PATTERNS", "").trim();
   cfg.CLAUDE_DANGER_PATTERNS = pats ? pats.split("||").map(s => s.trim()).filter(Boolean) : _DEFAULT_DANGER_RE.map(r => r.source);
+
+  cfg.AGY_CLI_PATH = envStr("MIXIN_AGY_CLI_PATH", "").trim() || null;
+  cfg.AGY_MODEL = envStr("MIXIN_AGY_MODEL", "").trim() || null;
+  cfg.AGY_AGENT = envStr("MIXIN_AGY_AGENT", "").trim() || null;
+  const agyMode = envStr("MIXIN_AGY_MODE", "").trim();
+  cfg.AGY_MODE = (agyMode && (["default", "accept-edits", "plan"] as const).includes(agyMode as "default" | "accept-edits" | "plan"))
+    ? agyMode as Cfg["AGY_MODE"]
+    : null;
 }
 
 dotenv.config({ path: DOTENV });
@@ -175,7 +192,7 @@ export interface EditableEntry {
 
 // APP_ID / APP_SECRET 故意不在此列（凭据，不走聊天框）。HISTORY_TURNS 已废弃（改用 SDK resume）。
 export const EDITABLE: EditableEntry[] = [
-  { key: "AGENT", env: "MIXIN_AGENT", kind: "choice", restart: true, choices: ["echo", "claude"], desc: "agent 类型（echo 测试 / claude 实战）" },
+  { key: "AGENT", env: "MIXIN_AGENT", kind: "choice", restart: true, choices: ["echo", "claude", "antigravity"], desc: "agent 类型（echo 测试 / claude 实战 / antigravity Antigravity CLI）" },
   { key: "WORKSPACE", env: "MIXIN_WORKSPACE", kind: "path", restart: true, desc: "默认工作目录根" },
   { key: "SYSTEM_PROMPT", env: "MIXIN_SYSTEM_PROMPT", kind: "str", desc: "agent 系统提示词" },
   { key: "CLAUDE_MODEL", env: "MIXIN_CLAUDE_MODEL", kind: "str", allowEmpty: true, desc: "模型（走 router 填 deepseek-chat 等；留空用默认）" },
@@ -186,6 +203,10 @@ export const EDITABLE: EditableEntry[] = [
   { key: "MAX_FILE_MB", env: "MIXIN_MAX_FILE_MB", kind: "int", desc: "单文件上限 MB" },
   { key: "CLAUDE_DANGER_CONFIRM", env: "MIXIN_CLAUDE_DANGER_CONFIRM", kind: "bool", desc: "危险操作是否在聊天框问 y/n（开/关）" },
   { key: "CLAUDE_DANGER_PATTERNS", env: "MIXIN_CLAUDE_DANGER_PATTERNS", kind: "regexlist", desc: "危险命令模式（|| 分隔的正则，对 Bash 命令匹配）" },
+  { key: "AGY_CLI_PATH", env: "MIXIN_AGY_CLI_PATH", kind: "str", allowEmpty: true, desc: "agy CLI 可执行路径（留空自动 PATH 查找）" },
+  { key: "AGY_MODEL", env: "MIXIN_AGY_MODEL", kind: "str", allowEmpty: true, desc: "agy 模型名（留空用 agy 默认）" },
+  { key: "AGY_AGENT", env: "MIXIN_AGY_AGENT", kind: "str", allowEmpty: true, desc: "agy agent 名（留空用 agy 默认）" },
+  { key: "AGY_MODE", env: "MIXIN_AGY_MODE", kind: "choice", allowEmpty: true, choices: ["default", "accept-edits", "plan"], desc: "agy --mode（default/accept-edits/plan；留空不传）" },
 ];
 
 export function lookup(keyOrNum: string): EditableEntry | undefined {
@@ -234,8 +255,13 @@ export function setValue(key: string, raw: string): string {
     }
     normalized = toks.join("||");
   } else if (e.kind === "choice") {
-    if (!e.choices!.some(c => c.toLowerCase() === val.toLowerCase())) throw new Error(`${key} 只能是: ${e.choices!.join(", ")}`);
-    normalized = val.toLowerCase();
+    if (!val && e.allowEmpty) {
+      normalized = "";
+    } else if (!e.choices!.some(c => c.toLowerCase() === val.toLowerCase())) {
+      throw new Error(`${key} 只能是: ${e.choices!.join(", ")}`);
+    } else {
+      normalized = val.toLowerCase();
+    }
   } else if (e.kind === "tools") {
     const toks = val.replace(/，/g, ",").split(",").map(t => t.trim()).filter(Boolean);
     if (!toks.length) throw new Error(`${key} 至少要有一个工具`);
