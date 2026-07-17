@@ -332,11 +332,13 @@ export class MessagePipe {
     }
     log.info("下载取址成功: fileUrl=%s", fileUrl);
 
-    // S3 预签名 URL 路径中可能有双斜杠（如 //chatAttachment），
-    // S3 签名计算时路径会被规范化为单斜杠，导致 SignatureDoesNotMatch
-    const normalizedUrl = fileUrl.replace(/(https?:\/\/[^/]+)\/{2,}/, "$1/");
+    // S3 预签名 URL 路径中可能有多余斜杠（如 host//chat 或 .../im-chat-attachment//chatAttachment），
+    // S3 签名计算时路径会被规范化为单斜杠，导致 SignatureDoesNotMatch。
+    // 把 host 之后的路径里所有连续斜杠合并为单个，保留协议后的 //。
+    const normalizedUrl = fileUrl.replace(/(https?:\/\/[^/]+)(\/+[^?]*)/, (_m: string, host: string, path: string) =>
+      host + path.replace(/\/{2,}/g, "/"));
     if (normalizedUrl !== fileUrl) {
-      log.info("URL 路径规范化: 双斜杠→单斜杠");
+      log.info("URL 路径规范化: %s → %s", fileUrl, normalizedUrl);
     }
 
     // 用 https.get 精确控制 header，避免 fetch 自动 header 干扰 S3 签名验证

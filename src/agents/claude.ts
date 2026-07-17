@@ -51,7 +51,7 @@ export class ClaudeAgent implements Agent {
     const permissionMode = dangerOn && cfg.CLAUDE_PERMISSION === "bypassPermissions"
       ? "default"
       : dangerOn ? cfg.CLAUDE_PERMISSION : "bypassPermissions";
-    const options: Options = {
+    const baseOptions: Options = {
       cwd: workspace,
       systemPrompt: cfg.SYSTEM_PROMPT + cfg.FILE_RETURN_INSTRUCTION,
       permissionMode,
@@ -59,44 +59,71 @@ export class ClaudeAgent implements Agent {
       // 危险确认开启时移除 Bash，让它流入 canUseTool 闸门；关闭时全量放行
       allowedTools: dangerOn ? cfg.CLAUDE_ALLOWED_TOOLS.filter(t => t !== "Bash") : [...cfg.CLAUDE_ALLOWED_TOOLS],
     };
-    if (cfg.CLAUDE_MODEL) options.model = cfg.CLAUDE_MODEL;
-    options.pathToClaudeCodeExecutable = this.claudeCliPath;
-    if (opts.sessionId) options.resume = opts.sessionId;
-    if (opts.abortController) options.abortController = opts.abortController;
-    if (dangerOn && opts.askPermission) options.canUseTool = makeCanUseTool(uid, opts.askPermission);
+    if (cfg.CLAUDE_MODEL) baseOptions.model = cfg.CLAUDE_MODEL;
+    baseOptions.pathToClaudeCodeExecutable = this.claudeCliPath;
+    if (opts.abortController) baseOptions.abortController = opts.abortController;
+    if (dangerOn && opts.askPermission) baseOptions.canUseTool = makeCanUseTool(uid, opts.askPermission);
 
-    let capturedSessionId: string | undefined;
-    const parts: string[] = [];
-    const collect = async (prompt: string | AsyncIterable<unknown>) => {
-      for await (const msg of query({ prompt: prompt as any, options })) {
-        const m = msg as any;
-        if (m.type === "assistant") {
-          for (const block of m.message.content) {
-            if (block.type === "text" && block.text) parts.push(block.text);
+    // 执行一次 query；返回 { sessionId, text, error }。error 非 null 表示 resume 失败等可重试错误。
+    const runOnce = async (resume?: string): Promise<{ sessionId?: string; text: string; retryable?: boolean }> => {
+      const options: Options = { ...baseOptions };
+      if (resume) options.resume = resume;
+      let capturedSessionId: string | undefined;
+      let resultError = false;
+      const parts: string[] = [];
+      const collect = async (prompt: string | AsyncIterable<unknown>) => {
+        for await (const msg of query({ prompt: prompt as any, options })) {
+          const m = msg as any;
+          if (m.type === "assistant") {
+            for (const block of m.message.content) {
+              if (block.type === "text" && block.text) parts.push(block.text);
+            }
+          } else if (m.type === "result") {
+            capturedSessionId = m.session_id;
+            if (m.subtype !== "success") {
+              log.warn("claude result 非成功: %s is_error=%s", m.subtype, m.is_error);
+              // error_during_execution 通常是 resume 的 session 不存在（跨机器/被清理）
+              if (m.subtype === "error_during_execution") resultError = true;
+            }
           }
-        } else if (m.type === "result") {
-          capturedSessionId = m.session_id;
-          if (m.subtype !== "success") log.warn("claude result 非成功: %s is_error=%s", m.subtype, m.is_error);
         }
+      };
+      try {
+        const imageBlocks = makeImageBlocks(images);
+        if (imageBlocks.length) {
+          try {
+            await collect(userStream(promptText, imageBlocks));
+          } catch (e) {
+            if ((e as Error).name === "AbortError") throw e;
+            log.warn("图片 image block 注入失败，回退到 Read 方式: %s", (e as Error).message);
+            await collect(buildPrompt(text, attachments, [], workspace));
+          }
+        } else {
+          await collect(promptText);
+        }
+      } catch (e) {
+        // /stop 或会话切换触发的中断：不重试，直接上抛
+        if ((e as Error).name === "AbortError") throw e;
+        // resume 的 session 不存在时 SDK 会抛 "No conversation found with session ID"
+        const msg = (e as Error).message ?? "";
+        if (resume && /No conversation found/i.test(msg)) {
+          log.warn("resume 的 session 不存在，降级为新会话重试: %s", msg);
+          return { text: "", retryable: true };
+        }
+        throw e;
       }
+      return { sessionId: capturedSessionId, text: parts.join("").trim(), retryable: resultError };
     };
 
-    const imageBlocks = makeImageBlocks(images);
-    if (imageBlocks.length) {
-      try {
-        await collect(userStream(promptText, imageBlocks));
-      } catch (e) {
-        // /stop 或会话切换触发的中断：不要回退重试，直接中止（否则会再起一次 query）
-        if ((e as Error).name === "AbortError") throw e;
-        log.warn("图片 image block 注入失败，回退到 Read 方式: %s", (e as Error).message);
-        await collect(buildPrompt(text, attachments, [], workspace));
-      }
-    } else {
-      await collect(promptText);
+    // 首次带 resume（若有）；resume 失败（session 不存在 / error_during_execution）自动降级为新会话
+    let res = await runOnce(opts.sessionId ?? undefined);
+    if (res.retryable) {
+      log.warn("首次 query 失败，降级为新会话重试（旧 sessionId=%s）", opts.sessionId ?? "(无)");
+      res = await runOnce(undefined);
     }
 
-    const resultText = parts.join("").trim() || "(已完成，无文本输出。若需要请查看回传的文件。)";
-    return { text: resultText, sessionId: capturedSessionId };
+    const resultText = res.text || "(已完成，无文本输出。若需要请查看回传的文件。)";
+    return { text: resultText, sessionId: res.sessionId };
   }
 }
 
