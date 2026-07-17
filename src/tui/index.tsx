@@ -753,7 +753,7 @@ function hints(): string {
     : WIZARD_FIELDS[fIdx()].choices?.length
       ? "↑↓/←→ 切换选项 · Enter 保存返回字段列表 · Esc 放弃编辑"
       : "直接输入或 Ctrl+V 粘贴 · Enter 保存返回字段列表 · Esc 放弃编辑";
-  if (view() === "logs") return "Tab/←→ 切换视图 · 鼠标选中即复制 · Ctrl+B 托盘后台 · q 退出";
+  if (view() === "logs") return "Tab/←→ 切换视图 · 鼠标选中后右键复制 · Ctrl+B 托盘后台 · q 退出";
   if (view() === "sessions") {
     const f = sessionFocus();
     if (f === "users") return "↑↓/jk 选用户 · Enter 查看会话 · 1-9 快选 · t 测试 · Tab 切视图 · Esc 日志";
@@ -848,19 +848,27 @@ function App() {
   onMount(() => { setDraft(WIZARD_FIELDS[0].get()); refreshActions(); if (mode() === "panel") void refreshUsers(); });
   useKeyboard(handleKey);
   usePaste(handlePaste);
-  // 选区完成时自动 OSC52 复制到剪贴板（鼠标选中文本松开即复制）
+  // 选区完成时显示"右键复制"提示（不自动复制）
   const r = useRenderer();
   useSelectionHandler((sel) => {
     if (sel.isDragging || !sel.isActive) return;
     const text = sel.getSelectedText();
+    if (text) setStatusMsg("右键复制", false);
+  });
+  // 右键复制选中文本
+  const onMouseDown = (event: any) => {
+    if (event.button !== 2) return;
+    const sel = r.getSelection();
+    if (!sel) return;
+    const text = sel.getSelectedText();
     if (!text) return;
     try {
       const ok = r.copyToClipboardOSC52(text);
-      if (ok) setStatusMsg(`已复制 ${text.length} 字符`);
+      if (ok) { setStatusMsg(`已复制 ${text.length} 字符`); r.clearSelection(); }
     } catch { /* 忽略 */ }
-  });
+  };
   return (
-    <box width="100%" height="100%" flexGrow={1} flexDirection="column" backgroundColor={C.bg}>
+    <box width="100%" height="100%" flexGrow={1} flexDirection="column" backgroundColor={C.bg} onMouseDown={onMouseDown}>
       {mode() === "wizard" ? <WizardView /> : <PanelView />}
     </box>
   );
@@ -904,7 +912,7 @@ export async function startTui(opts: { onQuit: () => void }): Promise<TuiHandle>
     quitFn();
   }, 250);
 
-  renderer = await createCliRenderer({ exitOnCtrlC: false, exitSignals: [], useKittyKeyboard: null });
+  renderer = await createCliRenderer({ exitOnCtrlC: false, exitSignals: [], useKittyKeyboard: null, useMouse: true });
   render(() => <App />, renderer);
 
   return {
