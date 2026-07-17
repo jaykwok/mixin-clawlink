@@ -332,10 +332,15 @@ export class MessagePipe {
     }
     log.info("下载取址成功: fileUrl=%s", fileUrl);
 
-    // fileUrl 是 MinIO/S3 预签名 URL（含 X-Amz 参数）
-    // Node.js fetch 会自动加 Accept-Encoding 等 header，可能干扰 S3 签名验证
-    // 用 https.get 精确控制 header，只发最小请求
-    const buf = await downloadPresignedUrl(fileUrl);
+    // S3 预签名 URL 路径中可能有双斜杠（如 //chatAttachment），
+    // S3 签名计算时路径会被规范化为单斜杠，导致 SignatureDoesNotMatch
+    const normalizedUrl = fileUrl.replace(/(https?:\/\/[^/]+)\/{2,}/, "$1/");
+    if (normalizedUrl !== fileUrl) {
+      log.info("URL 路径规范化: 双斜杠→单斜杠");
+    }
+
+    // 用 https.get 精确控制 header，避免 fetch 自动 header 干扰 S3 签名验证
+    const buf = await downloadPresignedUrl(normalizedUrl);
     if (!buf) {
       log.error("下载文件最终失败");
       return null;
