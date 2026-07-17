@@ -10,7 +10,7 @@
  * - renderer 自建（createCliRenderer），exitSignals:[] + exitOnCtrlC:false，退出由我们自己控。
  */
 import { createCliRenderer, type KeyEvent, type PasteEvent } from "@opentui/core";
-import { render, useKeyboard, usePaste } from "@opentui/solid";
+import { render, useKeyboard, usePaste, useSelectionHandler, useRenderer } from "@opentui/solid";
 import { createSignal, onMount } from "solid-js";
 import { execFile } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
@@ -753,7 +753,7 @@ function hints(): string {
     : WIZARD_FIELDS[fIdx()].choices?.length
       ? "↑↓/←→ 切换选项 · Enter 保存返回字段列表 · Esc 放弃编辑"
       : "直接输入或 Ctrl+V 粘贴 · Enter 保存返回字段列表 · Esc 放弃编辑";
-  if (view() === "logs") return "Tab/←→ 切换视图 · Ctrl+B 托盘后台 · q 退出";
+  if (view() === "logs") return "Tab/←→ 切换视图 · 鼠标选中即复制 · Ctrl+B 托盘后台 · q 退出";
   if (view() === "sessions") {
     const f = sessionFocus();
     if (f === "users") return "↑↓/jk 选用户 · Enter 查看会话 · 1-9 快选 · t 测试 · Tab 切视图 · Esc 日志";
@@ -848,6 +848,17 @@ function App() {
   onMount(() => { setDraft(WIZARD_FIELDS[0].get()); refreshActions(); if (mode() === "panel") void refreshUsers(); });
   useKeyboard(handleKey);
   usePaste(handlePaste);
+  // 选区完成时自动 OSC52 复制到剪贴板（鼠标选中文本松开即复制）
+  const r = useRenderer();
+  useSelectionHandler((sel) => {
+    if (sel.isDragging || !sel.isActive) return;
+    const text = sel.getSelectedText();
+    if (!text) return;
+    try {
+      const ok = r.copyToClipboardOSC52(text);
+      if (ok) setStatusMsg(`已复制 ${text.length} 字符`);
+    } catch { /* 忽略 */ }
+  });
   return (
     <box width="100%" height="100%" flexGrow={1} flexDirection="column" backgroundColor={C.bg}>
       {mode() === "wizard" ? <WizardView /> : <PanelView />}
