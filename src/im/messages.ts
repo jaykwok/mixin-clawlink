@@ -4,6 +4,7 @@
  */
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { extname } from "node:path";
+import { get } from "node:https";
 import { cfg } from "../config.ts";
 import { getLogger } from "../logger.ts";
 import { inferMsgType } from "../mime.ts";
@@ -331,41 +332,51 @@ export class MessagePipe {
     }
     log.info("下载取址成功: fileUrl=%s", fileUrl.slice(0, 120));
 
-    // fileUrl 下载：逐步升级 header 策略
-    // 1) 裸 fetch（预签名 URL 理论上无需鉴权）
-    // 2) 加 User-Agent（很多 OSS/CDN 拒绝无 UA 的请求 → 403）
-    // 3) 加 User-Agent + Bearer token（某些后端 fileUrl 是内部端点）
-    const UA = "Mixin-ClawLink/1.0";
-    const fetchOpts = (headers: Record<string, string>): RequestInit => ({
-      headers,
-      signal: AbortSignal.timeout(cfg.HTTP_TIMEOUT * 1000),
-    });
-    const strategies: { label: string; opts: RequestInit }[] = [
-      { label: "裸 fetch", opts: fetchOpts({}) },
-      { label: "加 User-Agent", opts: fetchOpts({ "User-Agent": UA }) },
-      { label: "加 UA + Bearer", opts: fetchOpts({ "User-Agent": UA, Authorization: `Bearer ${token}` }) },
-    ];
-
-    let fresp: Response | null = null;
-    for (const s of strategies) {
-      try {
-        fresp = await fetch(fileUrl, s.opts);
-        if (fresp.ok) break;
-        log.warn("下载文件 %s 失败: HTTP %d", s.label, fresp.status);
-        fresp = null;
-      } catch (e) {
-        log.warn("下载文件 %s 网络错误: %s", s.label, (e as Error).message);
-      }
-    }
-    if (!fresp || !fresp.ok) {
-      log.error("下载文件最终失败（已尝试 %d 种策略）", strategies.length);
+    // fileUrl 是 MinIO/S3 预签名 URL（含 X-Amz 参数）
+    // Node.js fetch 会自动加 Accept-Encoding 等 header，可能干扰 S3 签名验证
+    // 用 https.get 精确控制 header，只发最小请求
+    const buf = await downloadPresignedUrl(fileUrl);
+    if (!buf) {
+      log.error("下载文件最终失败");
       return null;
     }
 
-    const buf = Buffer.from(await fresp.arrayBuffer());
     const name = info.fileName ?? fileId;
     const mime = info.mimeType ?? "application/octet-stream";
     log.info("📥 已下载附件 %s (%sKB)", name, (buf.length / 1024).toFixed(1));
     return { data: buf, name, mime };
   }
+}
+
+/**
+ * 用 node:https 精确控制 header 下载 S3/MinIO 预签名 URL。
+ * Node.js fetch 会自动加 Accept、Accept-Encoding 等 header，可能干扰 S3 签名验证。
+ * https.get 只发最小 header，避免签名失效。
+ */
+function downloadPresignedUrl(url: string): Promise<Buffer | null> {
+  return new Promise(resolve => {
+    const req = get(url, {
+      timeout: cfg.HTTP_TIMEOUT * 1000,
+      headers: { "User-Agent": "Mixin-ClawLink/1.0" },
+    }, resp => {
+      // 跟随重定向
+      if (resp.statusCode && resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+        resp.resume();
+        downloadPresignedUrl(resp.headers.location).then(resolve);
+        return;
+      }
+      if (resp.statusCode !== 200) {
+        log.error("https.get 下载失败: HTTP %d", resp.statusCode);
+        resp.resume();
+        resolve(null);
+        return;
+      }
+      const chunks: Buffer[] = [];
+      resp.on("data", (c: Buffer) => chunks.push(c));
+      resp.on("end", () => resolve(Buffer.concat(chunks)));
+      resp.on("error", e => { log.error("https.get 流错误: %s", e.message); resolve(null); });
+    });
+    req.on("error", e => { log.error("https.get 请求错误: %s", e.message); resolve(null); });
+    req.on("timeout", () => { req.destroy(); log.error("https.get 超时"); resolve(null); });
+  });
 }
