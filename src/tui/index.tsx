@@ -18,22 +18,27 @@ import { cfg, reload, setValue, writeEnvRaw } from "../config.ts";
 import { setSuppressConsole, subscribeConsole } from "../logger.ts";
 import { fetchModels } from "../agents/models.ts";
 import { registry } from "../session/registry.ts";
+import { getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 import type { Bot } from "../bot.ts";
 import { cycleView, movePageSelection, numberedIndex, pageInfo, type PanelViewName } from "./navigation.ts";
 
-// ── 配色 ──────────────────────────────────────────────────────────
+// ── 配色（午夜深蓝 · 柔和层次）────────────────────────────────────
 const C = {
-  bg: "#070b12", header: "#0b1220", panel: "#101827", raised: "#162238",
-  selected: "#17365d", input: "#091321", border: "#263952", borderSoft: "#1b2b40",
-  text: "#edf4ff", dim: "#91a2ba", subtle: "#60728b", accent: "#69a7ff",
-  violet: "#a78bfa", cyan: "#5eead4", green: "#4ade80", yellow: "#fbbf24",
-  red: "#fb7185", ink: "#07101d",
-};
+  bg: "#080a14", header: "#0b0e1a", panel: "#0e1120", raised: "#131726",
+  selected: "#1c2740",
+  input: "#0a0d16",
+  border: "#1a1f30", borderSoft: "#131826",
+  text: "#dce4f0", dim: "#7a8aa5", subtle: "#4e5d78", faint: "#364258",
+  accent: "#5b9bf5",
+  violet: "#a08bf5", cyan: "#4dd4c4", green: "#3dd68c",
+  yellow: "#e8c44a", red: "#f06b7e",
+  ink: "#050810",
+} as const;
 
 const VIEW_META: Record<PanelViewName, { label: string; icon: string }> = {
-  logs: { label: "实时日志", icon: "◆" },
-  sessions: { label: "用户会话", icon: "●" },
-  actions: { label: "控制中心", icon: "✦" },
+  logs: { label: "日志", icon: "◆" },
+  sessions: { label: "会话", icon: "●" },
+  actions: { label: "操作", icon: "✦" },
 };
 
 // ── 状态信号（单实例，模块级）──────────────────────────────────────
@@ -55,6 +60,11 @@ const [wizardFocus, setWizardFocus] = createSignal<"fields" | "editor">("fields"
 const [users, setUsers] = createSignal<string[]>([]);
 const [selUser, setSelUser] = createSignal(0);
 const [userSessions, setUserSessions] = createSignal("");
+const [sessionList, setSessionList] = createSignal<{ num: number; title: string; turns: number; active: boolean }[]>([]);
+const [selSession, setSelSession] = createSignal(0);
+const [sessionHistory, setSessionHistory] = createSignal("");
+const [sessionFocus, setSessionFocus] = createSignal<"users" | "sessions" | "history">("users");
+const [historyScroll, setHistoryScroll] = createSignal(0);
 // 操作视图
 const [modelPick, setModelPick] = createSignal(false);
 const [modelList, setModelList] = createSignal<string[]>([]);
@@ -278,7 +288,7 @@ function switchPanelView(direction: 1 | -1): void {
   const next = cycleView(view(), direction);
   setView(next);
   setStatusMsg("");
-  if (next === "sessions") void refreshUsers();
+  if (next === "sessions") { setSessionFocus("users"); setSessionList([]); setSessionHistory(""); setHistoryScroll(0); void refreshUsers(); }
   if (next === "actions" && !modelPick()) refreshActions();
 }
 
@@ -294,17 +304,42 @@ function handleKey(key: KeyEvent): void {
   if (!key?.ctrl && (seq === "q" || name === "q")) { quitFn(); return; }
   if (name === "escape") {
     if (modelPick()) { refreshActions(); setStatusMsg(""); }
+    else if (view() === "sessions" && sessionFocus() !== "users") {
+      // 逐级返回：history → sessions → users
+      setSessionFocus(f => f === "history" ? "sessions" : "users");
+      setHistoryScroll(0);
+    }
     else if (view() !== "logs") { setView("logs"); setStatusMsg(""); }
     return;
   }
   if (name === "tab") { switchPanelView(key.shift ? -1 : 1); return; }
-  if (name === "left" || name === "right") { switchPanelView(name === "right" ? 1 : -1); return; }
+  if (name === "left" || name === "right") {
+    if (modelPick()) return; // 子模式中锁方向键，Esc 退出后才能切
+    if (view() === "sessions" && sessionFocus() !== "users") return; // 会话子级中锁方向键
+    switchPanelView(name === "right" ? 1 : -1); return;
+  }
   const digit = keyDigit(name, seq);
-  if (digit !== null && view() !== "logs") { void activateNumberedPanelItem(digit); return; }
-  if (view() === "sessions" && seq === "t") { void sendTestToSelected(); return; }
-  if (name === "pageup" || name === "pagedown") { pagePanel(name === "pagedown" ? 1 : -1); return; }
-  if (name === "up" || seq === "k") { navPanel(-1); return; }
-  if (name === "down" || seq === "j") { navPanel(1); return; }
+  if (digit !== null && view() !== "logs" && !(view() === "sessions" && sessionFocus() !== "users")) { void activateNumberedPanelItem(digit); return; }
+  if (view() === "sessions" && seq === "t" && sessionFocus() === "users") { void sendTestToSelected(); return; }
+  if (name === "pageup" || name === "pagedown") {
+    if (view() === "sessions" && sessionFocus() === "history") {
+      setHistoryScroll(s => Math.max(0, s + (name === "pagedown" ? 5 : -5)));
+      return;
+    }
+    if (view() === "sessions" && sessionFocus() === "users") { pagePanel(name === "pagedown" ? 1 : -1); return; }
+    if (view() === "sessions" && sessionFocus() === "sessions") { setSelSession(i => movePageSelection(sessionList().length, i, name === "pagedown" ? 1 : -1)); return; }
+    pagePanel(name === "pagedown" ? 1 : -1); return;
+  }
+  if (name === "up" || seq === "k") {
+    if (view() === "sessions" && sessionFocus() === "history") { setHistoryScroll(s => Math.max(0, s - 1)); return; }
+    if (view() === "sessions" && sessionFocus() === "sessions") { setSelSession(i => Math.max(0, i - 1)); return; }
+    navPanel(-1); return;
+  }
+  if (name === "down" || seq === "j") {
+    if (view() === "sessions" && sessionFocus() === "history") { setHistoryScroll(s => s + 1); return; }
+    if (view() === "sessions" && sessionFocus() === "sessions") { setSelSession(i => Math.min(Math.max(0, sessionList().length - 1), i + 1)); return; }
+    navPanel(1); return;
+  }
   if (name === "return" || name === "enter") { void activatePanel(); return; }
 }
 
@@ -371,8 +406,13 @@ function handleWizardKey(name: string, seq: string, shift: boolean): void {
 }
 
 function navPanel(dir: number): void {
-  if (view() === "sessions") setSelUser(i => clamp(i + dir, 0, Math.max(0, users().length - 1)));
-  else if (view() === "actions") {
+  if (view() === "sessions") {
+    setSelUser(i => clamp(i + dir, 0, Math.max(0, users().length - 1)));
+    setSessionFocus("users");
+    setHistoryScroll(0);
+    setSessionList([]);
+    setSessionHistory("");
+  } else if (view() === "actions") {
     const list = modelPick() ? modelList() : actions();
     setSelAct(i => clamp(i + dir, 0, Math.max(0, list.length - 1)));
   }
@@ -403,17 +443,82 @@ async function activateNumberedPanelItem(digit: number): Promise<void> {
   }
 }
 
+async function loadSessionHistory(uid: string, sessionNum: number): Promise<void> {
+  try {
+    const sid = await registry.getSessionIdByNum(uid, sessionNum);
+    if (!sid) { setSessionHistory("（该会话尚无 Claude session_id，发一条消息后才会产生）"); return; }
+    const msgs = await getSessionMessages(sid, { limit: 50 });
+    if (!msgs.length) { setSessionHistory("（无对话记录）"); return; }
+    const lines: string[] = [];
+    for (const m of msgs) {
+      const msg = m.message as any;
+      if (m.type === "user") {
+        const text = extractText(msg);
+        if (text) lines.push(`👤 ${text.slice(0, 200)}`);
+      } else if (m.type === "assistant") {
+        const text = extractText(msg);
+        if (text) lines.push(`🤖 ${text.slice(0, 300)}`);
+      }
+    }
+    setSessionHistory(lines.join("\n") || "（无文本对话记录）");
+  } catch (e) { setSessionHistory(`⚠️ ${(e as Error).message}`); }
+}
+
+function extractText(msg: any): string {
+  if (typeof msg?.content === "string") return msg.content;
+  if (Array.isArray(msg?.content)) {
+    return msg.content
+      .filter((b: any) => b.type === "text" && b.text)
+      .map((b: any) => b.text)
+      .join("");
+  }
+  return "";
+}
+
 async function activatePanel(indexOverride?: number): Promise<void> {
   if (view() === "sessions") {
-    const uid = users()[indexOverride ?? selUser()];
-    if (!uid) return;
-    try {
-      const ss = await registry.listSessions(uid);
-      const t = await registry.countTurns(uid);
-      const lines = ss.map(s => `  ${s.num}. ${s.title}（${s.turns} 轮）${s.active ? " ← 当前" : ""}`);
-      setUserSessions(`用户 ${uid}（${ss.length} 会话 / 当前槽 ${t} 轮）\n${lines.join("\n") || "（无会话）"}`);
-    } catch (e) { setUserSessions(`⚠️ ${(e as Error).message}`); }
-    return;
+    const focus = sessionFocus();
+    // 第一级：用户列表 → Enter 加载会话列表，进入会话选择
+    if (focus === "users") {
+      const uid = users()[indexOverride ?? selUser()];
+      if (!uid) return;
+      try {
+        const ss = await registry.listSessions(uid);
+        const t = await registry.countTurns(uid);
+        setSessionList(ss);
+        const lines = ss.map(s => `  ${s.num}. ${s.title}（${s.turns} 轮）${s.active ? " ← 当前" : ""}`);
+        setUserSessions(`用户 ${uid}（${ss.length} 会话 / 当前槽 ${t} 轮）\n${lines.join("\n") || "（无会话）"}`);
+        if (ss.length > 0) {
+          const activeNum = ss.find(s => s.active)?.num ?? 1;
+          setSelSession(activeNum - 1); // 0-based index
+          setSessionFocus("sessions");
+        }
+      } catch (e) { setUserSessions(`⚠️ ${(e as Error).message}`); setSessionList([]); }
+      return;
+    }
+    // 第二级：会话列表 → Enter 加载对话历史，进入历史浏览
+    if (focus === "sessions") {
+      const uid = users()[selUser()];
+      if (!uid) return;
+      const ss = sessionList();
+      const item = ss[selSession()];
+      if (!item) return;
+      setHistoryScroll(0);
+      await loadSessionHistory(uid, item.num);
+      setSessionFocus("history");
+      return;
+    }
+    // 第三级：对话历史 → Enter 刷新当前会话历史
+    if (focus === "history") {
+      const uid = users()[selUser()];
+      if (!uid) return;
+      const ss = sessionList();
+      const item = ss[selSession()];
+      if (!item) return;
+      setHistoryScroll(0);
+      await loadSessionHistory(uid, item.num);
+      return;
+    }
   }
   if (view() === "actions") {
     const activeIndex = indexOverride ?? selAct();
@@ -431,50 +536,74 @@ async function activatePanel(indexOverride?: number): Promise<void> {
 
 // ── 视图组件 ──────────────────────────────────────────────────────
 function wsLabel(): string { const w = wsStatus(); return w.status === "reconnecting" ? `${w.status} #${w.attempt}` : w.status; }
-function wsColor(): string { return wsStatus().status === "connected" ? C.green : C.yellow; }
-function authLabel(): string { const a = authStatus(); return a.refreshing ? "刷新中" : a.valid ? `有效 ${Math.floor(a.expiresIn / 60)}m` : "无"; }
+function authLabel(): string { const a = authStatus(); return a.refreshing ? "刷新中" : a.valid ? `${Math.floor(a.expiresIn / 60)}m` : "无"; }
 function pageLabel(total: number, selected: number): string {
   const info = pageInfo(total, selected);
-  return `${info.page + 1}/${info.pages} 页 · ${total} 项`;
+  return `${info.page + 1}/${info.pages} · ${total}`;
 }
 
 function BrandHeader() {
   return (
-    <box width="100%" height={3} flexShrink={0} border={["bottom"]} borderColor={C.accent} backgroundColor={C.header} flexDirection="column">
-      <box flexDirection="row"><text fg={C.text}>  Mixin ClawLink </text><text fg={C.violet}>/ CONTROL DECK</text></box>
-      <text fg={C.dim} wrapMode="none" truncate>  量子密信智能助理连接器 · 连接量子密信与本地 Agent</text>
+    <box width="100%" height={1} flexShrink={0} backgroundColor={C.header} flexDirection="row" alignItems="center">
+      <text fg={C.accent}> ◆ </text>
+      <text fg={C.text}>Mixin ClawLink</text>
+      <text fg={C.faint}> · </text>
+      <text fg={C.violet}>Control Deck</text>
+      <text fg={C.faint}>  量子密信智能助理连接器</text>
     </box>
   );
 }
 
-function StatusCards() {
+function StatusBar() {
+  const wsDot = () => {
+    const s = wsStatus().status;
+    if (s === "connected") return C.green;
+    if (s === "connecting") return C.yellow;
+    return C.red;
+  };
+  const authDot = () => authStatus().valid ? C.green : C.yellow;
   return (
-    <box width="100%" height={4} flexShrink={0} flexDirection="row" gap={1} backgroundColor={C.bg}>
-      <box flexGrow={1} flexShrink={1} flexBasis={0} border borderColor={C.borderSoft} backgroundColor={C.panel} flexDirection="column">
-        <text fg={C.subtle} wrapMode="none" truncate> AGENT</text><text fg={C.cyan} wrapMode="none" truncate> {agentName()}</text>
-      </box>
-      <box flexGrow={1} flexShrink={1} flexBasis={0} border borderColor={C.borderSoft} backgroundColor={C.panel} flexDirection="column">
-        <text fg={C.subtle} wrapMode="none" truncate> WEBSOCKET</text><text fg={wsColor()} wrapMode="none" truncate> {wsLabel()}</text>
-      </box>
-      <box flexGrow={1} flexShrink={1} flexBasis={0} border borderColor={C.borderSoft} backgroundColor={C.panel} flexDirection="column">
-        <text fg={C.subtle} wrapMode="none" truncate> TOKEN</text><text fg={authStatus().valid ? C.green : C.yellow} wrapMode="none" truncate> {authLabel()}</text>
-      </box>
-      <box flexGrow={1} flexShrink={1} flexBasis={0} border borderColor={C.borderSoft} backgroundColor={C.panel} flexDirection="column">
-        <text fg={C.subtle} wrapMode="none" truncate> USERS</text><text fg={C.violet} wrapMode="none" truncate> {String(userCount())}</text>
-      </box>
+    <box width="100%" height={1} flexShrink={0} backgroundColor={C.panel} flexDirection="row" alignItems="center">
+      <text fg={C.faint}> </text>
+      <text fg={C.cyan}>⬢</text>
+      <text fg={C.subtle}> </text>
+      <text fg={C.dim}>AGENT</text>
+      <text fg={C.faint}> </text>
+      <text fg={C.text}>{agentName()}</text>
+      <text fg={C.faint}>  │  </text>
+      <text fg={wsDot()}>●</text>
+      <text fg={C.subtle}> </text>
+      <text fg={C.dim}>WS</text>
+      <text fg={C.faint}> </text>
+      <text fg={C.text}>{wsLabel()}</text>
+      <text fg={C.faint}>  │  </text>
+      <text fg={authDot()}>●</text>
+      <text fg={C.subtle}> </text>
+      <text fg={C.dim}>TOKEN</text>
+      <text fg={C.faint}> </text>
+      <text fg={C.text}>{authLabel()}</text>
+      <text fg={C.faint}>  │  </text>
+      <text fg={C.violet}>◈</text>
+      <text fg={C.subtle}> </text>
+      <text fg={C.dim}>USERS</text>
+      <text fg={C.faint}> </text>
+      <text fg={C.text}>{String(userCount())}</text>
     </box>
   );
 }
 
 function PanelTabs() {
   return (
-    <box width="100%" height={2} flexShrink={0} flexDirection="row" backgroundColor={C.header} border={["bottom"]} borderColor={C.border}>
-      {(["logs", "sessions", "actions"] as PanelViewName[]).map(item => {
+    <box width="100%" height={1} flexShrink={0} flexDirection="row" backgroundColor={C.header}>
+      {(["logs", "sessions", "actions"] as PanelViewName[]).map((item, i) => {
         const active = () => view() === item;
         return (
-          <box flexGrow={1} flexShrink={1} flexBasis={0} backgroundColor={active() ? C.selected : C.header} border={active() ? ["bottom"] : false} borderColor={C.accent}>
-            <text fg={active() ? C.accent : C.dim}>{`  ${VIEW_META[item].icon} ${VIEW_META[item].label}  `}</text>
-          </box>
+          <>
+            {i > 0 && <text fg={C.faint}>│</text>}
+            <box flexGrow={1} flexShrink={1} flexBasis={0} backgroundColor={active() ? C.selected : C.header} justifyContent="center" alignItems="center" flexDirection="row">
+              <text fg={active() ? C.accent : C.subtle}>{` ${VIEW_META[item].icon} ${VIEW_META[item].label} `}</text>
+            </box>
+          </>
         );
       })}
     </box>
@@ -482,32 +611,57 @@ function PanelTabs() {
 }
 
 function LogsView() {
-  const tail = () => logs().slice(-Math.max(1, terminalSize().height - 16)).join("\n");
+  const tail = () => logs().slice(-Math.max(1, terminalSize().height - 12)).join("\n");
   return (
-    <box width="100%" height="100%" flexGrow={1} flexBasis={0} border borderColor={C.border} backgroundColor={C.panel} title=" ◆ 实时日志 " titleColor={C.accent} bottomTitle=" 自动跟随最新输出 " bottomTitleAlignment="right">
-      <text fg="#a9b1d6" wrapMode="none" truncate>{tail() || "（暂无日志）"}</text>
+    <box width="100%" height="100%" flexGrow={1} flexBasis={0} border borderColor={C.border} backgroundColor={C.panel} title=" 实时日志 " titleColor={C.accent} bottomTitle=" 自动跟随 " bottomTitleAlignment="right">
+      <text fg="#8895b0" wrapMode="none" truncate>{tail() || "（等待 bot 启动…）"}</text>
     </box>
   );
 }
 
 function SessionsView() {
-  const page = () => pageInfo(users().length, selUser());
-  const visible = () => users().slice(page().start, page().end);
+  const userPage = () => pageInfo(users().length, selUser());
+  const userVisible = () => users().slice(userPage().start, userPage().end);
+  const wide = () => terminalSize().width >= 110;
+  const focus = () => sessionFocus();
+  const sessPage = () => pageInfo(sessionList().length, selSession());
+  const sessVisible = () => sessionList().slice(sessPage().start, sessPage().end);
+  const historyLines = () => (sessionHistory() || "Enter 加载对话历史").split("\n");
+  const historyVisible = () => {
+    const lines = historyLines();
+    const maxLines = Math.max(1, terminalSize().height - 12);
+    const start = Math.min(historyScroll(), Math.max(0, lines.length - maxLines));
+    return lines.slice(start, start + maxLines).join("\n");
+  };
+  const selSessionNum = () => { const s = sessionList()[selSession()]; return s ? s.num : 0; };
   return (
     <box width="100%" height="100%" flexGrow={1} flexBasis={0} flexDirection="row" gap={1}>
-      <box flexGrow={2} flexShrink={1} flexBasis={0} border borderColor={C.border} backgroundColor={C.panel} title=" ● 用户列表 " titleColor={C.cyan} bottomTitle={pageLabel(users().length, selUser())} bottomTitleAlignment="right">
-        {visible().map((u, offset) => {
-          const index = page().start + offset;
+      <box flexGrow={1} flexShrink={1} flexBasis={0} border borderColor={focus() === "users" ? C.accent : C.border} backgroundColor={C.panel} title=" 用户 " titleColor={C.cyan} bottomTitle={pageLabel(users().length, selUser())} bottomTitleAlignment="right">
+        {userVisible().map((u, offset) => {
+          const index = userPage().start + offset;
+          const num = offset + 1;
           return (
             <box width="100%" height={1} flexShrink={0} overflow="hidden" backgroundColor={index === selUser() ? C.selected : C.panel}>
-              <text fg={index === selUser() ? C.accent : C.text} wrapMode="none" truncate>{`${index === selUser() ? "›" : " "} [${offset + 1}] ${u}`}</text>
+              <text fg={index === selUser() ? C.accent : C.text} wrapMode="none" truncate>{`${index === selUser() ? "▸" : " "}${num}. ${u}`}</text>
             </box>
           );
         })}
-        {users().length === 0 && <text fg={C.dim}> 暂无用户 · 在量子密信中给 bot 发一条消息</text>}
+        {users().length === 0 && <text fg={C.subtle}> 暂无用户 — 在量子密信中给 bot 发消息</text>}
       </box>
-      <box flexGrow={3} flexShrink={1} flexBasis={0} border borderColor={C.border} backgroundColor={C.panel} title=" 会话详情 " titleColor={C.violet}>
-        <text fg="#a9b1d6" wrapMode="word" truncate>{userSessions()}</text>
+      <box flexGrow={1} flexShrink={1} flexBasis={0} border borderColor={focus() === "sessions" ? C.accent : C.border} backgroundColor={C.raised} title=" 会话 " titleColor={C.violet} bottomTitle={sessionList().length ? pageLabel(sessionList().length, selSession()) : ""} bottomTitleAlignment="right">
+        {sessVisible().map((s, offset) => {
+          const index = sessPage().start + offset;
+          const num = offset + 1;
+          return (
+            <box width="100%" height={1} flexShrink={0} overflow="hidden" backgroundColor={index === selSession() ? C.selected : C.raised}>
+              <text fg={index === selSession() ? C.accent : C.text} wrapMode="none" truncate>{`${index === selSession() ? "▸" : " "}${num}. ${s.title}（${s.turns}轮）${s.active ? " *" : ""}`}</text>
+            </box>
+          );
+        })}
+        {sessionList().length === 0 && <text fg={C.subtle}> {userSessions() ? "选择用户后按 Enter" : "← 先选用户"}</text>}
+      </box>
+      <box flexGrow={2} flexShrink={1} flexBasis={0} border borderColor={focus() === "history" ? C.accent : C.border} backgroundColor={C.raised} title=" 对话历史 " titleColor={C.green} bottomTitle={selSessionNum() ? ` 会话 ${selSessionNum()} ` : ""} bottomTitleAlignment="right">
+        <text fg="#8895b0" wrapMode="word" truncate>{historyVisible()}</text>
       </box>
     </box>
   );
@@ -519,16 +673,17 @@ function ActionsView() {
   const visible = () => list().slice(page().start, page().end);
   const title = () => (modelPick() ? " 模型目录 " : " 快捷操作 ");
   const detail = () => modelPick()
-    ? "选择后写入 CLAUDE_MODEL，下条消息生效。\n\n模型来源：当前 Claude 后端的 /models 接口。"
+    ? "选择后写入 CLAUDE_MODEL\n下条消息生效\n\n来源：Claude /models"
     : `${ACTION_LIST[selAct()]?.label ?? "—"}\n\n${ACTION_LIST[selAct()]?.detail ?? "请选择一项操作"}`;
   return (
     <box width="100%" height="100%" flexGrow={1} flexBasis={0} flexDirection="row" gap={1}>
       <box flexGrow={3} flexShrink={1} flexBasis={0} border borderColor={C.border} backgroundColor={C.panel} title={title()} titleColor={C.accent} bottomTitle={pageLabel(list().length, selAct())} bottomTitleAlignment="right">
         {visible().map((label, offset) => {
           const index = page().start + offset;
+          const num = offset + 1;
           return (
             <box width="100%" height={1} flexShrink={0} overflow="hidden" backgroundColor={index === selAct() ? C.selected : C.panel}>
-              <text fg={index === selAct() ? C.accent : C.text} wrapMode="none" truncate>{`${index === selAct() ? "›" : " "} [${offset + 1}] ${label}`}</text>
+              <text fg={index === selAct() ? C.accent : C.text} wrapMode="none" truncate>{`${index === selAct() ? "▸" : " "}${num}. ${label}`}</text>
             </box>
           );
         })}
@@ -543,25 +698,34 @@ function ActionsView() {
 function hints(): string {
   const compact = terminalSize().width < 100;
   if (compact && mode() === "wizard") return wizardFocus() === "fields"
-    ? "[Enter] 编辑  [1–9/↑↓] 选择  [PgUp/PgDn] 翻页  [Esc] 返回"
-    : WIZARD_FIELDS[fIdx()].choices?.length ? "[↑↓] 选择  [Enter] 保存返回  [Esc] 放弃" : "[输入/Ctrl+V] 编辑  [Enter] 保存返回  [Esc] 放弃";
-  if (compact && view() === "logs") return "[Tab/←→] 切视图  [Ctrl+B] 后台  [q] 退出";
-  if (compact) return "[1–9] 执行  [↑↓] 选择  [PgUp/PgDn] 翻页  [Esc] 返回";
+    ? "Enter 编辑 · ↑↓/1-9 选择 · PgUp/Dn 翻页 · Esc 返回"
+    : WIZARD_FIELDS[fIdx()].choices?.length ? "↑↓ 选择 · Enter 保存 · Esc 放弃" : "输入/Ctrl+V 编辑 · Enter 保存 · Esc 放弃";
+  if (compact && view() === "logs") return "Tab/←→ 切视图 · Ctrl+B 后台 · q 退出";
+  if (compact) return "1-9 执行 · ↑↓ 选择 · PgUp/Dn 翻页 · Esc 返回";
   if (mode() === "wizard") return wizardFocus() === "fields"
-    ? `[Enter] 进入编辑  [1–9/↑↓] 选择字段  [PgUp/PgDn] 翻页  [Ctrl+S] ${wizardFromPanel ? "完成配置" : "保存启动"}  [Esc] 返回`
+    ? `Enter 进入编辑 · ↑↓/1-9 选择 · PgUp/Dn 翻页 · Ctrl+S ${wizardFromPanel ? "完成" : "保存启动"} · Esc 返回`
     : WIZARD_FIELDS[fIdx()].choices?.length
-      ? "[↑↓/←→] 切换选项  [Enter] 保存并返回列表  [Esc] 放弃当前选择"
-      : "[输入/Ctrl+V] 编辑  [Enter] 保存并返回列表  [Esc] 放弃当前编辑";
-  if (view() === "logs") return "[Tab/Shift+Tab 或 ←/→] 切换视图  [Ctrl+B] 托盘后台  [q / Ctrl+C] 退出";
-  if (view() === "sessions") return "[1–9] 打开当前页用户  [↑↓/jk] 选择  [PgUp/PgDn] 翻页  [t] 测试  [Esc] 日志";
-  return "[1–9] 执行当前页项目  [↑↓/jk] 选择  [PgUp/PgDn] 翻页  [Enter] 执行  [Esc] 返回";
+      ? "↑↓/←→ 切换选项 · Enter 保存返回 · Esc 放弃"
+      : "输入/Ctrl+V 编辑 · Enter 保存返回 · Esc 放弃";
+  if (view() === "logs") return "Tab/←→ 切换视图 · Ctrl+B 托盘后台 · q/Ctrl+C 退出";
+  if (view() === "sessions") {
+    const f = sessionFocus();
+    if (f === "users") return "↑↓/jk 选用户 · Enter 查看会话 · 1-9 快选 · t 测试 · Tab 切视图 · Esc 日志";
+    if (f === "sessions") return "↑↓/jk 选会话 · Enter 查看对话 · PgUp/Dn 翻页 · Esc 返回用户";
+    return "↑↓/jk/PgUp/Dn 滚动 · Enter 刷新 · Esc 返回会话列表";
+  }
+  return "1-9 执行 · ↑↓/jk 选择 · PgUp/Dn 翻页 · Enter 执行 · Esc 返回";
 }
 
 function BottomBar() {
   return (
-    <box width="100%" height={3} flexShrink={0} border={["top"]} borderColor={statusMsg() ? C.yellow : C.border} backgroundColor={C.header} flexDirection="column">
-      <text fg={statusMsg() ? C.yellow : C.header} wrapMode="none" truncate>  {statusMsg() || " "}</text>
-      <text fg={C.dim} wrapMode="none" truncate>  {hints()}</text>
+    <box width="100%" height={2} flexShrink={0} backgroundColor={C.header} flexDirection="column">
+      <box width="100%" height={1} flexShrink={0} backgroundColor={statusMsg() ? C.yellow : C.border}>
+        <text fg={C.ink} wrapMode="none" truncate>{` ${statusMsg() || ""}`}</text>
+      </box>
+      <box width="100%" height={1} flexShrink={0} backgroundColor={C.header}>
+        <text fg={C.subtle} wrapMode="none" truncate>{` ${hints()}`}</text>
+      </box>
     </box>
   );
 }
@@ -573,9 +737,8 @@ function WizardView() {
   return (
     <box width="100%" height="100%" flexGrow={1} flexDirection="column" backgroundColor={C.bg}>
       <BrandHeader />
-      <box width="100%" height={3} flexShrink={0} border={["bottom"]} borderColor={C.border} backgroundColor={C.header} flexDirection="column">
-        <text fg={C.accent}>  {wizardFromPanel ? "配置工作台 / 编辑现有 .env" : "首次运行 / 初始化连接器"}</text>
-        <text fg={C.dim}>  Claude Code 的 key 与 base URL 自动读取用户级配置</text>
+      <box width="100%" height={1} flexShrink={0} backgroundColor={C.panel} flexDirection="row" alignItems="center">
+        <text fg={C.accent}> {wizardFromPanel ? "配置工作台 / 编辑 .env" : "首次运行 / 初始化连接器"}</text>
       </box>
       <box width="100%" flexGrow={1} flexShrink={1} flexBasis={0} flexDirection="row" gap={1}>
         <box flexGrow={1} flexShrink={1} flexBasis={0} border borderColor={wizardFocus() === "fields" ? C.accent : C.border} backgroundColor={C.panel} title=" 配置字段 " titleColor={wizardFocus() === "fields" ? C.accent : C.dim} bottomTitle={pageLabel(WIZARD_FIELDS.length, fIdx())} bottomTitleAlignment="right">
@@ -583,14 +746,14 @@ function WizardView() {
             const index = page().start + offset;
             return (
               <box width="100%" height={1} flexShrink={0} overflow="hidden" backgroundColor={index === fIdx() ? C.selected : C.panel}>
-                <text fg={index === fIdx() ? C.accent : C.dim} wrapMode="none" truncate>{`${index === fIdx() ? "›" : " "} [${offset + 1}] ${fld.label}`}</text>
+                <text fg={index === fIdx() ? C.accent : C.subtle} wrapMode="none" truncate>{` ${index === fIdx() ? "▸" : " "} ${fld.label}`}</text>
               </box>
             );
           })}
         </box>
         <box flexGrow={1} flexShrink={1} flexBasis={0} border borderColor={wizardFocus() === "editor" ? C.accent : C.border} backgroundColor={C.raised} title=" 当前值 " titleColor={wizardFocus() === "editor" ? C.accent : C.dim} flexDirection="column">
-          <text fg={wizardFocus() === "editor" ? C.cyan : C.subtle} wrapMode="none" truncate> {wizardFocus() === "editor" ? (current().choices?.length ? "SELECTING · ↑/↓ 选择 · Enter 保存返回" : "EDITING · Enter 保存返回 · Ctrl+V 粘贴") : "READY · Enter 进入编辑"}</text>
-          <text fg={C.subtle}> FIELD</text>
+          <text fg={wizardFocus() === "editor" ? C.cyan : C.subtle} wrapMode="none" truncate> {wizardFocus() === "editor" ? (current().choices?.length ? "SELECTING · ↑/↓ · Enter 保存" : "EDITING · Enter 保存 · Ctrl+V 粘贴") : "READY · Enter 编辑"}</text>
+          <text fg={C.faint}> FIELD</text>
           <box width="100%" height={2} flexShrink={0} overflow="hidden"><text fg={C.text} wrapMode="word" truncate> {current().label}</text></box>
           {wizardFocus() === "editor" && current().choices?.length ? (
             <box width="100%" flexGrow={1} flexShrink={1} flexBasis={0} overflow="hidden" border borderColor={C.cyan} backgroundColor={C.input} title=" 请选择 " titleColor={C.cyan} flexDirection="column">
@@ -598,18 +761,18 @@ function WizardView() {
                 const selected = () => choice.toLowerCase() === draft().toLowerCase();
                 return (
                   <box width="100%" height={1} flexShrink={0} overflow="hidden" backgroundColor={selected() ? C.selected : C.input}>
-                    <text fg={selected() ? C.accent : C.text} wrapMode="none" truncate>{`${selected() ? "●" : "○"} [${index + 1}] ${choice}`}</text>
+                    <text fg={selected() ? C.accent : C.text} wrapMode="none" truncate>{` ${selected() ? "▸" : " "} ${choice}`}</text>
                   </box>
                 );
               })}
             </box>
           ) : (
             <>
-              <text fg={C.subtle}> VALUE</text>
+              <text fg={C.faint}> VALUE</text>
               <box width="100%" height={3} flexShrink={0} overflow="hidden" border borderColor={wizardFocus() === "editor" ? C.cyan : C.borderSoft} backgroundColor={C.input}>
                 <text fg={draft() ? C.green : C.subtle} wrapMode="none" truncate> {draft() ? tailWindow(draft(), Math.max(12, Math.floor(terminalSize().width / 2) - 8)) : "（空值；按 Enter 进入编辑）"}</text>
               </box>
-              {current().choices?.length ? <text fg={C.dim} wrapMode="none" truncate> 候选项：按 Enter 展开完整选择框</text> : <text fg={C.dim}> 文本字段 · 按 Enter 后直接输入</text>}
+              {current().choices?.length ? <text fg={C.subtle} wrapMode="none" truncate> 候选项：按 Enter 展开选择框</text> : <text fg={C.subtle}> 文本字段 · Enter 后输入</text>}
             </>
           )}
         </box>
@@ -623,9 +786,9 @@ function PanelView() {
   return (
     <box width="100%" height="100%" flexGrow={1} flexDirection="column" backgroundColor={C.bg}>
       <BrandHeader />
-      <StatusCards />
+      <StatusBar />
       <PanelTabs />
-      <box width="100%" flexGrow={1} flexShrink={1} flexBasis={0}>
+      <box width="100%" flexGrow={1} flexShrink={1} flexBasis={0} padding={0}>
         {view() === "logs" && <LogsView />}
         {view() === "sessions" && <SessionsView />}
         {view() === "actions" && <ActionsView />}
@@ -699,6 +862,7 @@ export async function startTui(opts: { onQuit: () => void }): Promise<TuiHandle>
       setWsStatus({ status: ws.status, attempt: ws.attempt });
       bot.onWsStatus((s, attempt) => setWsStatus({ status: s, attempt }));
       setAuthStatus(bot.getAuthStatus());
+      setStatusMsg("");
       void refreshUsers();
     },
     detachBot: () => { /* 旧 ws 回调随旧 ConnectionManager 一起作废；attachBot 会重接 */ },

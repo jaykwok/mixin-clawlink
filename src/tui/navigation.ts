@@ -1,6 +1,6 @@
 export const PAGE_SIZE = 9;
 
-export const PANEL_VIEWS = ["logs", "sessions", "actions"] as const;
+const PANEL_VIEWS = ["logs", "sessions", "actions"] as const;
 export type PanelViewName = (typeof PANEL_VIEWS)[number];
 
 export function cycleView(current: PanelViewName, direction: 1 | -1): PanelViewName {

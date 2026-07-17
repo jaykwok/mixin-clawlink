@@ -123,6 +123,15 @@ class Registry {
     return idx.sessions.map((s, i) => ({ num: i + 1, title: s.title, turns: s.turns, active: s.id === idx.active }));
   }
 
+  /** 按编号获取会话的 claude sessionId（供 TUI 拉取对话历史）。 */
+  async getSessionIdByNum(uid: string, num: number): Promise<string | null> {
+    const idx = await this.read(uid);
+    if (num >= 1 && num <= idx.sessions.length) {
+      return idx.sessions[num - 1].sessionId;
+    }
+    return null;
+  }
+
   /** 枚举所有已知用户（扫 data/conversations/ 子目录名；供 TUI 用户面板）。 */
   async listUsers(): Promise<string[]> {
     try {
