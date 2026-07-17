@@ -329,6 +329,7 @@ export class MessagePipe {
       log.error("下载取址未返回 fileUrl: %s", JSON.stringify(info));
       return null;
     }
+    log.info("下载取址成功: fileUrl=%s", fileUrl.slice(0, 120));
 
     // fileUrl 下载：逐步升级 header 策略
     // 1) 裸 fetch（预签名 URL 理论上无需鉴权）

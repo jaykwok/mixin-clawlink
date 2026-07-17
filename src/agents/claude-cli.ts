@@ -23,6 +23,22 @@ function usableFile(path: string | undefined | null): string | null {
     if (existsSync(npmCli)) return npmCli;
     return null;
   }
+  // Windows 上无扩展名的 "claude" 是 npm shell wrapper，SDK 无法直接 spawn
+  // 优先找同目录的 claude.exe 或 claude.cmd
+  if (process.platform === "win32" && ext === "") {
+    const binDir = dirname(full);
+    const exe = join(binDir, "claude.exe");
+    if (existsSync(exe)) return exe;
+    const cmd = join(binDir, "claude.cmd");
+    if (existsSync(cmd)) {
+      const native = join(binDir, "claude.exe");
+      if (existsSync(native)) return native;
+      const npmCli = join(binDir, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+      if (existsSync(npmCli)) return npmCli;
+      return null;
+    }
+    // 如果既没有 .exe 也没有 .cmd，可能是真正无扩展名的二进制（如 scoop 安装），放行
+  }
   return full;
 }
 
@@ -52,6 +68,8 @@ export function resolveClaudeCliPath(configured?: string | null): string | null 
     ? [
         join(home, ".local", "bin", "claude.exe"),
         process.env.APPDATA ? join(process.env.APPDATA, "npm", "claude.exe") : "",
+        process.env.APPDATA ? join(process.env.APPDATA, "npm", "claude") : "",
+        process.env.APPDATA ? join(process.env.APPDATA, "npm", "claude.cmd") : "",
         process.env.APPDATA ? join(process.env.APPDATA, "npm", "node_modules", "@anthropic-ai", "claude-code", "cli.js") : "",
       ]
     : [join(home, ".local", "bin", "claude"), "/usr/local/bin/claude", "/usr/bin/claude"];

@@ -48,7 +48,15 @@ const [wsStatus, setWsStatus] = createSignal<{ status: string; attempt: number }
 const [authStatus, setAuthStatus] = createSignal<{ valid: boolean; refreshing: boolean; expiresIn: number }>({ valid: false, refreshing: false, expiresIn: 0 });
 const [userCount, setUserCount] = createSignal(0);
 const [logs, setLogs] = createSignal<string[]>([]);
-const [statusMsg, setStatusMsg] = createSignal("");
+const [statusMsg, setStatusMsgRaw] = createSignal("");
+let statusTimer: ReturnType<typeof setTimeout> | null = null;
+function setStatusMsg(msg: string, autoClear = true): void {
+  setStatusMsgRaw(msg);
+  if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
+  if (autoClear && msg) {
+    statusTimer = setTimeout(() => { setStatusMsgRaw(""); statusTimer = null; }, 3000);
+  }
+}
 const [view, setView] = createSignal<PanelViewName>("logs");
 const [terminalSize, setTerminalSize] = createSignal({ width: process.stdout.columns || 120, height: process.stdout.rows || 30 });
 
@@ -242,7 +250,7 @@ function openConfigEditor(): void {
 }
 function cancelWizard(): void {
   if (!wizardFromPanel) {
-    setStatusMsg("首次运行尚无可返回的面板；请完成配置，或按 Ctrl+C 退出");
+    setStatusMsg("首次运行尚无可返回的面板；请完成配置，或按 q 退出");
     return;
   }
   wizardFromPanel = false;
@@ -309,7 +317,7 @@ function switchPanelView(direction: 1 | -1): void {
 function handleKey(key: KeyEvent): void {
   const seq: string = key?.sequence ?? "";
   const name: string = key?.name ?? "";
-  if (key?.ctrl && name === "c") { quitFn(); return; }
+  if (key?.ctrl && name === "c") { return; } // 不退出，允许用户复制日志
   if (key?.ctrl && name === "b") { minimizeToTray(); return; }
   if (mode() === "wizard" && key?.ctrl && name === "v") { void pasteFromWindowsClipboard(); return; }
   if (mode() === "wizard" && key?.ctrl && (name === "s" || seq === "\x13")) { finalizeWizard(); return; }
@@ -745,7 +753,7 @@ function hints(): string {
     : WIZARD_FIELDS[fIdx()].choices?.length
       ? "↑↓/←→ 切换选项 · Enter 保存返回字段列表 · Esc 放弃编辑"
       : "直接输入或 Ctrl+V 粘贴 · Enter 保存返回字段列表 · Esc 放弃编辑";
-  if (view() === "logs") return "Tab/←→ 切换视图 · Ctrl+B 托盘后台 · q/Ctrl+C 退出";
+  if (view() === "logs") return "Tab/←→ 切换视图 · Ctrl+B 托盘后台 · q 退出";
   if (view() === "sessions") {
     const f = sessionFocus();
     if (f === "users") return "↑↓/jk 选用户 · Enter 查看会话 · 1-9 快选 · t 测试 · Tab 切视图 · Esc 日志";
