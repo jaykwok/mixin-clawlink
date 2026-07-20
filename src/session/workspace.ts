@@ -3,14 +3,36 @@
  * 文件回传改由 agent 用 [[FILE: 路径]] 标记显式声明，不整目录 diff（大目录不卡）。
  */
 import { mkdir } from "node:fs/promises";
-import { mkdirSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { extname, isAbsolute, resolve } from "node:path";
 import { cfg, expandHome } from "../config.ts";
 
 /** 文件名/目录名净化：替换危险字符，避免路径穿越。 */
 export function safeName(name: string): string {
   const s = name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64);
   return s || "file";
+}
+
+/** 格式化时间为 YYYYMMDDHHmmss（如 20260720140832）。 */
+export function formatTimestamp(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/**
+ * 生成全局 inbox 内唯一的附件路径：文件名=时间戳+原扩展名（如 20260720140832.png），
+ * 同秒冲突自动加序号（_2、_3…）。origName 仅用于取扩展名。
+ */
+export function uniqueInboxPath(inboxDir: string, origName: string, now: Date = new Date()): string {
+  const ext = extname(origName) || "";
+  const ts = formatTimestamp(now);
+  let name = `${ts}${ext}`;
+  let p = resolve(inboxDir, name);
+  for (let i = 2; existsSync(p); i++) {
+    name = `${ts}_${i}${ext}`;
+    p = resolve(inboxDir, name);
+  }
+  return p;
 }
 
 export class Workspace {

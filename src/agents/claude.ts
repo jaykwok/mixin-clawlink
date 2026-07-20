@@ -11,7 +11,7 @@
  * query() 无状态，每消息独立；session_id 从 result 消息抓取回写 registry。
  */
 import { readFileSync } from "node:fs";
-import { basename, extname } from "node:path";
+import { extname } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { Options, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { cfg, isDangerous } from "../config.ts";
@@ -182,8 +182,7 @@ function buildPrompt(text: string, others: string[], images: string[], workspace
   out.push(text || "(用户发来了附件)");
   if (images.length) out.push("(用户发来了图片，见下方消息内容。)");
   if (others.length) {
-    const names = others.map(a => basename(a)).join(", ");
-    out.push(`(非图片附件已放在工作目录 inbox/ 下：${names}，可用 Read 工具读取。)`);
+    out.push(`(非图片附件已下载到 inbox，可用 Read 工具读取绝对路径：${others.join(", ")})`);
   }
   return out.join("\n");
 }

@@ -5,7 +5,7 @@
  * TS 单线程：每用户用 Promise 链串行（withLock）；/stop 用 AbortController 中断 query。
  */
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 import { checkCredentials, cfg, EDITABLE, getValue, lookup, setValue } from "./config.ts";
 import { expandHome } from "./config.ts";
 import { makeAgent } from "./agents/index.ts";
@@ -18,7 +18,7 @@ import { ConnectionManager } from "./im/transport.ts";
 import { getLogger } from "./logger.ts";
 import { guessMime } from "./mime.ts";
 import { registry } from "./session/registry.ts";
-import { Workspace, safeName } from "./session/workspace.ts";
+import { Workspace, uniqueInboxPath } from "./session/workspace.ts";
 
 const log = getLogger("bot");
 
@@ -377,14 +377,15 @@ export class Bot {
     const uid = msg.senderId;
     const wd = this.workspace.currentDir(uid);
 
-    // 1) 下载入站附件到 inbox/
+    // 1) 下载入站附件到全局 inbox/（workspace 根目录下，不随 /cwd 散落；时间戳命名避免覆盖）
     const attachments: string[] = [];
     let attachFailed = false;
     if (msg.fileId) {
       const res = await this.pipe.downloadFile(msg.fileId);
       if (res) {
-        const p = resolve(wd, "inbox", safeName(res.name));
-        await mkdir(dirname(p), { recursive: true });
+        const inboxDir = resolve(this.workspace.root, "inbox");
+        const p = uniqueInboxPath(inboxDir, res.name);
+        await mkdir(inboxDir, { recursive: true });
         await writeFile(p, res.data);
         attachments.push(p);
         log.info("入站附件已落盘: %s", p);

@@ -13,7 +13,7 @@
  * - 附件：写进 prompt 让 agy 用工具读（和 claude 一样）。
  * - --continue 偶发报错，加 1 次重试（仅对 --conversation 模式）。
  */
-import { basename, extname } from "node:path";
+import { extname } from "node:path";
 import { spawn } from "node:child_process";
 import { cfg } from "../config.ts";
 import { getLogger } from "../logger.ts";
@@ -217,8 +217,7 @@ function buildPrompt(text: string, others: string[], images: string[], workspace
   out.push(text || "(用户发来了附件)");
   if (images.length) out.push("(用户发来了图片，见下方消息内容。)");
   if (others.length) {
-    const names = others.map(a => basename(a)).join(", ");
-    out.push(`(非图片附件已放在工作目录 inbox/ 下：${names}，可用 Read 工具读取。)`);
+    out.push(`(非图片附件已下载到 inbox，可用 Read 工具读取绝对路径：${others.join(", ")})`);
   }
   return out.join("\n");
 }
