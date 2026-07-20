@@ -853,7 +853,7 @@ function App() {
   useSelectionHandler((sel) => {
     if (sel.isDragging || !sel.isActive) return;
     const text = sel.getSelectedText();
-    if (text) setStatusMsg("右键复制", false);
+    if (text) setStatusMsg("右键复制");
   });
   // 右键复制选中文本
   const onMouseDown = (event: any) => {
