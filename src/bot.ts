@@ -6,7 +6,7 @@
  */
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, resolve } from "node:path";
-import { checkCredentials, cfg, EDITABLE, getValue, lookup, setValue } from "./config.ts";
+import { checkCredentials, cfg, EDITABLE, getValue, lookup, setValue, INBOX_DIR } from "./config.ts";
 import { expandHome } from "./config.ts";
 import { makeAgent } from "./agents/index.ts";
 import type { Agent } from "./agents/base.ts";
@@ -383,11 +383,11 @@ export class Bot {
     if (msg.fileId) {
       const res = await this.pipe.downloadFile(msg.fileId);
       if (res) {
-        const inboxDir = resolve(this.workspace.root, "inbox");
-        // 图片用纯时间戳命名；文档(xlsx/docx 等)保留原文件名+时间戳，方便用户按名描述
+        // 附件统一存到程序目录下 inbox/（独立于工作目录，不污染 agent 的项目目录）；agent 用绝对路径读取
         const isImage = inferMsgType(guessMime(res.name)) === "image";
-        const p = uniqueInboxPath(inboxDir, res.name, new Date(), !isImage);
-        await mkdir(inboxDir, { recursive: true });
+        // 图片用纯时间戳命名；文档(xlsx/docx 等)保留原文件名+时间戳，方便用户按名描述
+        const p = uniqueInboxPath(INBOX_DIR, res.name, new Date(), !isImage);
+        await mkdir(INBOX_DIR, { recursive: true });
         await writeFile(p, res.data);
         attachments.push(p);
         log.info("入站附件已落盘: %s", p);

@@ -18,6 +18,9 @@ export function expandHome(p: string): string {
 
 const DOTENV = resolve(process.cwd(), ".env");
 
+/** 入站附件统一存放目录（程序根/inbox，独立于工作目录，避免污染 agent 的项目目录）。 */
+export const INBOX_DIR = resolve(process.cwd(), "inbox");
+
 const _ENDPOINTS: Record<string, string> = {
   production: "https://imtwo.zdxlz.com/open-apis/v1",
   staging: "https://mxpre.zdxlz.com:1443/open-apis/v1",
