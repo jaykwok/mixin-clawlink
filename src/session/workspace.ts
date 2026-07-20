@@ -20,16 +20,28 @@ export function formatTimestamp(d: Date): string {
 }
 
 /**
- * 生成全局 inbox 内唯一的附件路径：文件名=时间戳+原扩展名（如 20260720140832.png），
- * 同秒冲突自动加序号（_2、_3…）。origName 仅用于取扩展名。
+ * 温和净化文件名（保留中文、空格等可读字符），只去掉文件系统禁用字符。
+ * 区别于 safeName（严格净化，用于 uid→目录名等安全场景）。
  */
-export function uniqueInboxPath(inboxDir: string, origName: string, now: Date = new Date()): string {
+export function sanitizeFileName(name: string): string {
+  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, "").replace(/^\.+/, "").trim().slice(0, 100) || "file";
+}
+
+/**
+ * 生成全局 inbox 内唯一的附件路径。
+ * - keepOriginalName=false（图片）：纯时间戳+扩展名（如 20260720140832.png）
+ * - keepOriginalName=true（文档等）：原文件名_时间戳+扩展名（如 销售报表_20260720140832.xlsx），
+ *   方便用户按文件名描述；同名同秒冲突自动加序号（_2、_3…）。
+ */
+export function uniqueInboxPath(inboxDir: string, origName: string, now: Date = new Date(), keepOriginalName = false): string {
   const ext = extname(origName) || "";
   const ts = formatTimestamp(now);
-  let name = `${ts}${ext}`;
+  const stem = keepOriginalName ? sanitizeFileName(origName.slice(0, origName.length - ext.length)) : "";
+  const make = (sfx: string) => keepOriginalName ? `${stem}_${ts}${sfx}${ext}` : `${ts}${sfx}${ext}`;
+  let name = make("");
   let p = resolve(inboxDir, name);
   for (let i = 2; existsSync(p); i++) {
-    name = `${ts}_${i}${ext}`;
+    name = make(`_${i}`);
     p = resolve(inboxDir, name);
   }
   return p;

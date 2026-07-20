@@ -16,7 +16,7 @@ import { MessagePipe } from "./im/messages.ts";
 import type { InboundMessage } from "./im/messages.ts";
 import { ConnectionManager } from "./im/transport.ts";
 import { getLogger } from "./logger.ts";
-import { guessMime } from "./mime.ts";
+import { guessMime, inferMsgType } from "./mime.ts";
 import { registry } from "./session/registry.ts";
 import { Workspace, uniqueInboxPath } from "./session/workspace.ts";
 
@@ -384,7 +384,9 @@ export class Bot {
       const res = await this.pipe.downloadFile(msg.fileId);
       if (res) {
         const inboxDir = resolve(this.workspace.root, "inbox");
-        const p = uniqueInboxPath(inboxDir, res.name);
+        // 图片用纯时间戳命名；文档(xlsx/docx 等)保留原文件名+时间戳，方便用户按名描述
+        const isImage = inferMsgType(guessMime(res.name)) === "image";
+        const p = uniqueInboxPath(inboxDir, res.name, new Date(), !isImage);
         await mkdir(inboxDir, { recursive: true });
         await writeFile(p, res.data);
         attachments.push(p);
