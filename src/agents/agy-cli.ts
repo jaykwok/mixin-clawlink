@@ -209,19 +209,3 @@ export function detectAgyVersion(cliPath: string): string | null {
     return null;
   }
 }
-
-/**
- * 比较两个 semver 字符串（如 "1.1.3" vs "1.1.0"）。
- * @returns -1 if a<b, 0 if a==b, 1 if a>b；无法解析时按 0 处理。
- */
-export function cmpVersion(a: string, b: string): number {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const va = pa[i] ?? 0;
-    const vb = pb[i] ?? 0;
-    if (va < vb) return -1;
-    if (va > vb) return 1;
-  }
-  return 0;
-}

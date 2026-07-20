@@ -212,7 +212,7 @@ export const EDITABLE: EditableEntry[] = [
   { key: "AGY_MODEL", env: "MIXIN_AGY_MODEL", kind: "str", allowEmpty: true, desc: "agy 模型名（留空用 agy 默认）" },
   { key: "AGY_AGENT", env: "MIXIN_AGY_AGENT", kind: "str", allowEmpty: true, desc: "agy agent 名（留空用 agy 默认）" },
   { key: "AGY_MODE", env: "MIXIN_AGY_MODE", kind: "choice", allowEmpty: true, choices: ["default", "accept-edits", "plan"], desc: "agy --mode（default/accept-edits/plan；留空不传）" },
-  { key: "AGY_PERMISSION", env: "MIXIN_AGY_PERMISSION", kind: "choice", choices: ["bypass", "settings"], desc: "agy 权限策略：bypass=--dangerously-skip-permissions 全自动（旧，兼容所有版本）；settings=靠 settings.json 权限/sandbox 控制（需 agy≥1.1.4，更安全）" },
+  { key: "AGY_PERMISSION", env: "MIXIN_AGY_PERMISSION", kind: "choice", choices: ["bypass", "settings"], desc: "agy 权限策略：bypass=--dangerously-skip-permissions 全自动；settings=靠 agy settings.json 的 toolPermission/sandbox 控制（需 agy≥1.1.4）" },
 ];
 
 export function lookup(keyOrNum: string): EditableEntry | undefined {

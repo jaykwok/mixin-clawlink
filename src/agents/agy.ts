@@ -18,7 +18,7 @@ import { spawn } from "node:child_process";
 import { cfg } from "../config.ts";
 import { getLogger } from "../logger.ts";
 import type { Agent, ReplyOpts, ReplyResult } from "./base.ts";
-import { resolveAgyCliPath, latestConversationId, detectAgyVersion, cmpVersion, isAgyAuthenticated } from "./agy-cli.ts";
+import { resolveAgyCliPath, latestConversationId, detectAgyVersion, isAgyAuthenticated } from "./agy-cli.ts";
 
 const log = getLogger("agent:agy");
 const IMG_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
@@ -29,7 +29,6 @@ const PRINT_TIMEOUT_MS = 10 * 60 * 1000;
 export class AgyAgent implements Agent {
   readonly name = "antigravity";
   private agyCliPath = "";
-  private agyVersion: string | null = null;
 
   async startup(): Promise<void> {
     const path = resolveAgyCliPath(cfg.AGY_CLI_PATH);
@@ -40,20 +39,8 @@ export class AgyAgent implements Agent {
       throw new Error(detail);
     }
     this.agyCliPath = path;
-    this.agyVersion = detectAgyVersion(path);
-    if (this.agyVersion) {
-      log.info("使用本机 agy CLI: %s (v%s)", path, this.agyVersion);
-      // 1.1.1 之前 --print 失败返回 0 + 空输出，无法区分成功/失败
-      if (cmpVersion(this.agyVersion, "1.1.1") < 0) {
-        log.warn("agy v%s < 1.1.1，--print 失败可能返回空输出而非非零退出码", this.agyVersion);
-      }
-      // 1.1.4 起 headless(--print) 才读 settings.json 权限策略；settings 模式需 ≥1.1.4
-      if (cfg.AGY_PERMISSION === "settings" && cmpVersion(this.agyVersion, "1.1.4") < 0) {
-        log.warn("agy v%s < 1.1.4，headless 不读 settings.json 权限策略，AGY_PERMISSION=settings 将退回 bypass", this.agyVersion);
-      }
-    } else {
-      log.info("使用本机 agy CLI: %s (版本探测失败，按最新版行为处理)", path);
-    }
+    const version = detectAgyVersion(path);
+    log.info("使用本机 agy CLI: %s%s", path, version ? ` (v${version})` : "");
 
     // 认证检测：agy 需要浏览器 OAuth 登录，headless 模式下无法完成
     if (!isAgyAuthenticated()) {
@@ -81,7 +68,7 @@ export class AgyAgent implements Agent {
     const maxAttempts = convId ? 2 : 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        resultText = await runAgyPrint(this.agyCliPath, promptText, workspace, convId, opts.abortController, this.agyVersion);
+        resultText = await runAgyPrint(this.agyCliPath, promptText, workspace, convId, opts.abortController);
         break;
       } catch (e) {
         lastErr = e as Error;
@@ -125,16 +112,12 @@ function runAgyPrint(
   cwd: string,
   convId: string | null,
   abortController?: AbortController,
-  agyVersion: string | null = null,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const args = ["--print", prompt];
-    // 权限策略：bypass=--dangerously-skip-permissions 全自动（兼容所有版本）；
-    // settings=不传该 flag，靠 settings.json 的 toolPermission 控制（需 agy≥1.1.4 headless 才读）。
-    // 版本不足或探测失败时，settings 模式退回 bypass，避免旧版 headless 卡在权限确认。
-    const useSettings = cfg.AGY_PERMISSION === "settings"
-      && agyVersion !== null && cmpVersion(agyVersion, "1.1.4") >= 0;
-    if (!useSettings) args.push("--dangerously-skip-permissions");
+    // 权限策略：bypass=--dangerously-skip-permissions 全自动；
+    // settings=不传该 flag，靠 agy settings.json 的 toolPermission/sandbox 控制（需 agy≥1.1.4）。
+    if (cfg.AGY_PERMISSION !== "settings") args.push("--dangerously-skip-permissions");
     if (convId) args.push("--conversation", convId);
     if (cfg.AGY_MODEL) args.push("--model", cfg.AGY_MODEL);
     if (cfg.AGY_AGENT) args.push("--agent", cfg.AGY_AGENT);

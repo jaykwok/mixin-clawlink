@@ -176,7 +176,7 @@ src/
 
 `CLAUDE_PERMISSION` 默认使用 `auto`：Agent 自行判断，必要时申请权限；`CLAUDE_DANGER_CONFIRM=1` 时，命中危险模式的 Bash 仍会强制在量子密信中确认。
 
-`AGY_PERMISSION` 控制 agy 的工具权限：`bypass`（默认）= `--dangerously-skip-permissions` 全自动放行，兼容所有 agy 版本；`settings` = 不传该 flag，改由 agy 的 `settings.json`（`toolPermission`/`sandbox`/`trustedWorkspaces`）控制，更精细安全，但需 agy ≥ 1.1.4（1.1.4 起 headless `--print` 才读 settings.json 策略，旧版会自动退回 bypass）。
+`AGY_PERMISSION` 控制 agy 的工具权限：`bypass`（默认）= `--dangerously-skip-permissions` 全自动放行；`settings` = 不传该 flag，改由 agy 的 `settings.json`（`toolPermission`/`sandbox`/`trustedWorkspaces`）控制，更精细安全（需 agy ≥ 1.1.4，1.1.4 起 headless `--print` 才读 settings.json 策略）。
 
 **`/reboot`** 软重启：进程内拆重建（停 WS → 重读 `.env` → 新建 Bot），几秒重连，不用碰服务器。
 
