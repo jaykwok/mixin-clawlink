@@ -66,6 +66,27 @@ function lastConversationsCachePath(): string {
   return resolve(agyDataDir(), "cache", "last_conversations.json");
 }
 
+/** agy 会话元数据文件路径（按 uuid 索引，含 WorkspaceURIs/Title/last_modified_time，比缓存更可靠）。 */
+function conversationMetadataPath(): string {
+  return resolve(agyDataDir(), "cache", "conversation_metadata.json");
+}
+
+/**
+ * 校验 conversation uuid 是否真实存在（非孤儿）。
+ * 读 conversation_metadata.json，检查 uuid 是否在 conversations 映射里。
+ * metadata 文件不存在或解析失败时返回 true（宽松校验，不阻断）。
+ */
+function isConversationAlive(uuid: string): boolean {
+  try {
+    const raw = readFileSync(conversationMetadataPath(), "utf8");
+    const meta = JSON.parse(raw) as { conversations?: Record<string, unknown> };
+    if (!meta.conversations) return true; // 结构不符，不阻断
+    return uuid in meta.conversations;
+  } catch {
+    return true; // 文件不存在/解析失败，宽松放行
+  }
+}
+
 /**
  * 检测 agy 是否已完成 OAuth 认证。
  * agy 登录后会在 ~/.gemini/antigravity-cli/ 下存放认证凭据文件。
@@ -99,18 +120,22 @@ export function isAgyAuthenticated(): boolean {
 /**
  * 读 last_conversations.json，按 workspace 路径查 conversation uuid。
  * agy 会话按 cwd 隔离，这个缓存文件是精确映射。
+ * 查到后再用 conversation_metadata.json 校验 uuid 是否仍存活，避免续接到已删除的孤儿会话。
  */
 function conversationIdByWorkspace(workspace: string): string | null {
   const cacheFile = lastConversationsCachePath();
+  let map: Record<string, string>;
   try {
-    const raw = readFileSync(cacheFile, "utf8");
-    const map = JSON.parse(raw) as Record<string, string>;
-    // key 是绝对路径，需要规范化比较（resolve 已去 trailing sep）
-    const key = resolve(workspace);
-    return map[key] ?? null;
+    map = JSON.parse(readFileSync(cacheFile, "utf8")) as Record<string, string>;
   } catch {
     return null;
   }
+  // key 是绝对路径，需要规范化比较（resolve 已去 trailing sep）
+  const key = resolve(workspace);
+  const id = map[key];
+  if (!id) return null;
+  // 校验存活：metadata 里不存在说明是孤儿 uuid（会话已删），不返回它
+  return isConversationAlive(id) ? id : null;
 }
 
 /**
@@ -141,7 +166,9 @@ function latestConversationIdFromDir(): string | null {
   }
   if (!best) return null;
   const base = best.name.replace(/\.db$/i, "");
-  return base || null;
+  if (!base) return null;
+  // 校验存活：metadata 里不存在说明是孤儿，不返回
+  return isConversationAlive(base) ? base : null;
 }
 
 /**

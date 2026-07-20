@@ -65,6 +65,8 @@ export interface Cfg {
   AGY_MODEL: string | null;
   AGY_AGENT: string | null;
   AGY_MODE: "default" | "accept-edits" | "plan" | null;
+  /** agy 权限策略：bypass=--dangerously-skip-permissions 全自动（旧）；settings=靠 settings.json 权限/sandbox 控制（需 agy≥1.1.4） */
+  AGY_PERMISSION: "bypass" | "settings";
   // 运维参数（非 env 派生，不参与热改；改了需重启进程）
   HTTP_TIMEOUT: number;
   TOKEN_REFRESH_LEAD_S: number;
@@ -101,6 +103,7 @@ export const cfg: Cfg = {
   AGY_MODEL: null,
   AGY_AGENT: null,
   AGY_MODE: null,
+  AGY_PERMISSION: "bypass",
   HTTP_TIMEOUT: 30,
   TOKEN_REFRESH_LEAD_S: 60,
   WS_PING_INTERVAL_S: 30,
@@ -161,6 +164,8 @@ function apply(): void {
   cfg.AGY_MODE = (agyMode && (["default", "accept-edits", "plan"] as const).includes(agyMode as "default" | "accept-edits" | "plan"))
     ? agyMode as Cfg["AGY_MODE"]
     : null;
+  const agyPerm = envStr("MIXIN_AGY_PERMISSION", "bypass").trim();
+  cfg.AGY_PERMISSION = agyPerm === "settings" ? "settings" : "bypass";
 }
 
 dotenv.config({ path: DOTENV });
@@ -207,6 +212,7 @@ export const EDITABLE: EditableEntry[] = [
   { key: "AGY_MODEL", env: "MIXIN_AGY_MODEL", kind: "str", allowEmpty: true, desc: "agy 模型名（留空用 agy 默认）" },
   { key: "AGY_AGENT", env: "MIXIN_AGY_AGENT", kind: "str", allowEmpty: true, desc: "agy agent 名（留空用 agy 默认）" },
   { key: "AGY_MODE", env: "MIXIN_AGY_MODE", kind: "choice", allowEmpty: true, choices: ["default", "accept-edits", "plan"], desc: "agy --mode（default/accept-edits/plan；留空不传）" },
+  { key: "AGY_PERMISSION", env: "MIXIN_AGY_PERMISSION", kind: "choice", choices: ["bypass", "settings"], desc: "agy 权限策略：bypass=--dangerously-skip-permissions 全自动（旧，兼容所有版本）；settings=靠 settings.json 权限/sandbox 控制（需 agy≥1.1.4，更安全）" },
 ];
 
 export function lookup(keyOrNum: string): EditableEntry | undefined {
