@@ -379,6 +379,7 @@ export class Bot {
 
     // 1) 下载入站附件到 inbox/
     const attachments: string[] = [];
+    let attachFailed = false;
     if (msg.fileId) {
       const res = await this.pipe.downloadFile(msg.fileId);
       if (res) {
@@ -387,11 +388,17 @@ export class Bot {
         await writeFile(p, res.data);
         attachments.push(p);
         log.info("入站附件已落盘: %s", p);
+      } else {
+        // 下载失败（多为服务端预签名 URL 签名无效）：提示用户，避免 agent 读旧文件误识别
+        attachFailed = true;
+        await this.pipe.sendTip(uid, "⚠️ 附件下载失败（服务端预签名 URL 签名无效），请联系运维排查或重发。");
       }
     }
 
     // 2) 记首条消息作标题 + 取当前槽位 claude sessionId（供 resume）
-    const userText = msg.text || "(用户发来了附件)";
+    const userText = attachFailed
+      ? (msg.text ? `${msg.text}\n（注：你发的附件下载失败，无法读取，请基于文字内容回复。）` : "(用户发来了附件，但下载失败，无法读取)")
+      : (msg.text || "(用户发来了附件)");
     await registry.noteUser(uid, userText);
     const sessionId = await registry.getActiveSessionId(uid);
 

@@ -4,7 +4,6 @@
  */
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { extname } from "node:path";
-import { get } from "node:https";
 import { cfg } from "../config.ts";
 import { getLogger } from "../logger.ts";
 import { inferMsgType } from "../mime.ts";
@@ -331,65 +330,28 @@ export class MessagePipe {
       return null;
     }
     log.info("下载取址成功: fileUrl=%s", fileUrl);
-    // 打印完整响应字段，便于诊断预签名 URL 签名无效等问题
+    // 打印完整响应字段，便于诊断预签名 URL 签名无效等服务端问题
     log.info("下载取址完整响应: %s", JSON.stringify(info));
 
-    // S3 预签名 URL 路径中可能有多余斜杠（如 host//chat 或 .../im-chat-attachment//chatAttachment），
-    // S3 签名计算时路径会被规范化为单斜杠，导致 SignatureDoesNotMatch。
-    // 把 host 之后的路径里所有连续斜杠合并为单个，保留协议后的 //。
-    const normalizedUrl = fileUrl.replace(/(https?:\/\/[^/]+)(\/+[^?]*)/, (_m: string, host: string, path: string) =>
-      host + path.replace(/\/{2,}/g, "/"));
-    if (normalizedUrl !== fileUrl) {
-      log.info("URL 路径规范化: %s → %s", fileUrl, normalizedUrl);
-    }
-
-    // 用 https.get 精确控制 header，避免 fetch 自动 header 干扰 S3 签名验证
-    const buf = await downloadPresignedUrl(normalizedUrl);
-    if (!buf) {
-      log.error("下载文件最终失败");
+    // 预签名 URL，无需鉴权；fetch 自动跟随重定向。
+    // 注：曾尝试 https.get + 双斜杠规范化规避 SignatureDoesNotMatch，但实测无效——
+    // 403 根因是服务端生成的签名与 URL 路径不匹配（//chatAttachment 双斜杠 + /downloadmi 网关前缀），
+    // 客户端无法修，需服务端排查。故回退到最朴素的 fetch(fileUrl)。
+    let fresp: Response;
+    try {
+      fresp = await fetch(fileUrl, {
+        signal: AbortSignal.timeout(cfg.HTTP_TIMEOUT * 1000),
+      });
+      if (!fresp.ok) throw new Error(`HTTP ${fresp.status}`);
+    } catch (e) {
+      log.error("下载文件失败: %s（疑似服务端预签名 URL 签名无效）", (e as Error).message);
       return null;
     }
 
+    const buf = Buffer.from(await fresp.arrayBuffer());
     const name = info.fileName ?? fileId;
     const mime = info.mimeType ?? "application/octet-stream";
     log.info("📥 已下载附件 %s (%sKB)", name, (buf.length / 1024).toFixed(1));
     return { data: buf, name, mime };
   }
-}
-
-/**
- * 用 node:https 精确控制 header 下载 S3/MinIO 预签名 URL。
- * Node.js fetch 会自动加 Accept、Accept-Encoding 等 header，可能干扰 S3 签名验证。
- * https.get 只发最小 header，避免签名失效。
- */
-function downloadPresignedUrl(url: string): Promise<Buffer | null> {
-  return new Promise(resolve => {
-    const req = get(url, {
-      timeout: cfg.HTTP_TIMEOUT * 1000,
-      headers: { "User-Agent": "Mixin-ClawLink/1.0" },
-    }, resp => {
-      // 跟随重定向
-      if (resp.statusCode && resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
-        resp.resume();
-        downloadPresignedUrl(resp.headers.location).then(resolve);
-        return;
-      }
-      if (resp.statusCode !== 200) {
-        const body: Buffer[] = [];
-        resp.on("data", (c: Buffer) => body.push(c));
-        resp.on("end", () => {
-          const errText = Buffer.concat(body).toString("utf8").slice(0, 500);
-          log.error("https.get 下载失败: HTTP %d | body: %s", resp.statusCode, errText);
-          resolve(null);
-        });
-        return;
-      }
-      const chunks: Buffer[] = [];
-      resp.on("data", (c: Buffer) => chunks.push(c));
-      resp.on("end", () => resolve(Buffer.concat(chunks)));
-      resp.on("error", e => { log.error("https.get 流错误: %s", e.message); resolve(null); });
-    });
-    req.on("error", e => { log.error("https.get 请求错误: %s", e.message); resolve(null); });
-    req.on("timeout", () => { req.destroy(); log.error("https.get 超时"); resolve(null); });
-  });
 }
