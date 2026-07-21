@@ -165,7 +165,7 @@ class Registry {
     }
   }
 
-  /** 按编号删除（从大到小删，避免索引错位）。删光后自动新开一个会话，保持系统始终 ≥1 会话。 */
+  /** 按编号删除（从大到小删，避免索引错位）。删的是当前活动会话时，统一行为：新开一个并切到它。 */
   async deleteSessions(uid: string, nums: number[]): Promise<{ deleted: number; activeDeleted: boolean; remaining: number }> {
     const idx = await this.read(uid);
     const sessions = idx.sessions;
@@ -178,14 +178,18 @@ class Registry {
         deleted++;
       }
     }
-    // active 失效（被删或原本无效）→ 指向最近一个
-    if (!sessions.some(s => s.id === idx.active)) {
-      idx.active = sessions.length ? sessions[sessions.length - 1].id : null;
-    }
-    // 全删光时自动新开一个会话：系统始终保持 ≥1 会话，避免 0 会话状态（/list 无回应、active 悬空等）
-    if (sessions.length === 0) {
+    if (activeDeleted) {
+      // 删的是当前活动会话 → 新开一个并切到它（统一行为，而非切到剩余的某个）
       idx.sessions.push({ id: newSlotId(), sessionId: null, title: PLACEHOLDER, created: Date.now(), turns: 0 });
-      idx.active = idx.sessions[0].id;
+      idx.active = idx.sessions[idx.sessions.length - 1].id;
+    } else if (!sessions.some(s => s.id === idx.active)) {
+      // active 未被本次删但失效（异常状态）→ 修到最近一个；空则建新，保持 ≥1 会话
+      if (sessions.length) {
+        idx.active = sessions[sessions.length - 1].id;
+      } else {
+        idx.sessions.push({ id: newSlotId(), sessionId: null, title: PLACEHOLDER, created: Date.now(), turns: 0 });
+        idx.active = idx.sessions[0].id;
+      }
     }
     await this.write(uid, idx);
     return { deleted, activeDeleted, remaining: idx.sessions.length };

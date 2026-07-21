@@ -42,14 +42,27 @@ test("deleteSessions 删不存在的编号返回 deleted=0", async () => {
   expect(remaining).toBe(1);
 });
 
-test("deleteSessions 删当前活动会话后 active 切到剩余的", async () => {
+test("deleteSessions 删当前活动会话后新开一个并切到它", async () => {
   const uid = "u-active";
   await registry.newSession(uid); // 1
   await registry.newSession(uid); // 2（active）
   const { deleted, activeDeleted, remaining } = await registry.deleteSessions(uid, [2]);
   expect(deleted).toBe(1);
   expect(activeDeleted).toBe(true);
-  expect(remaining).toBe(1);
+  expect(remaining).toBe(2); // 剩会话1 + 新开的1个
   const list = await registry.listSessions(uid);
+  expect(list.length).toBe(2);
   expect(list.find(s => s.active)).toBeDefined();
+});
+
+test("deleteSessions 删非活动会话不影响 active", async () => {
+  const uid = "u-keepactive";
+  await registry.newSession(uid); // 1
+  await registry.newSession(uid); // 2（active）
+  const { activeDeleted, remaining } = await registry.deleteSessions(uid, [1]); // 删非active
+  expect(activeDeleted).toBe(false);
+  expect(remaining).toBe(1); // 只剩会话2
+  const list = await registry.listSessions(uid);
+  expect(list.length).toBe(1);
+  expect(list[0].active).toBe(true); // 会话2仍是active
 });

@@ -100,7 +100,10 @@ export class MessagePipe {
     const content = cb.content ?? {};
     const chatId = cb.groupId || senderId;
 
-    if (this.isRecent(this.fingerprint(senderId, msgType, content))) {
+    // 斜杠命令不走内容去重：用户可能连续点 /list /status 等，靠 msgUid 防 WS 重投即可
+    const rawText = typeof content === "object" && content ? String(content.content ?? "") : String(content);
+    const isCommand = msgType === "text" && rawText.trim().startsWith("/");
+    if (!isCommand && this.isRecent(this.fingerprint(senderId, msgType, content))) {
       log.info("内容去重，跳过重复投递: sender=%s type=%s", mask(senderId), msgType);
       return null;
     }
