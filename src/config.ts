@@ -66,8 +66,10 @@ export interface Cfg {
   // agy CLI 适配器配置（AGENT=agy 时生效）
   AGY_CLI_PATH: string | null;
   AGY_MODEL: string | null;
+  /** agy 1.1.5+ reasoning effort；留空时由模型/agy 决定。 */
+  AGY_EFFORT: "low" | "medium" | "high" | null;
   AGY_AGENT: string | null;
-  AGY_MODE: "default" | "accept-edits" | "plan" | null;
+  AGY_MODE: "accept-edits" | "plan" | null;
   /** agy 权限策略：bypass=--dangerously-skip-permissions 全自动（旧）；settings=靠 settings.json 权限/sandbox 控制（需 agy≥1.1.4） */
   AGY_PERMISSION: "bypass" | "settings";
   // 运维参数（非 env 派生，不参与热改；改了需重启进程）
@@ -104,6 +106,7 @@ export const cfg: Cfg = {
   CLAUDE_DANGER_PATTERNS: [],
   AGY_CLI_PATH: null,
   AGY_MODEL: null,
+  AGY_EFFORT: null,
   AGY_AGENT: null,
   AGY_MODE: null,
   AGY_PERMISSION: "bypass",
@@ -162,9 +165,14 @@ function apply(): void {
 
   cfg.AGY_CLI_PATH = envStr("MIXIN_AGY_CLI_PATH", "").trim() || null;
   cfg.AGY_MODEL = envStr("MIXIN_AGY_MODEL", "").trim() || null;
+  const agyEffort = envStr("MIXIN_AGY_EFFORT", "").trim().toLowerCase();
+  cfg.AGY_EFFORT = (agyEffort && (["low", "medium", "high"] as const).includes(agyEffort as NonNullable<Cfg["AGY_EFFORT"]>))
+    ? agyEffort as Cfg["AGY_EFFORT"]
+    : null;
   cfg.AGY_AGENT = envStr("MIXIN_AGY_AGENT", "").trim() || null;
   const agyMode = envStr("MIXIN_AGY_MODE", "").trim();
-  cfg.AGY_MODE = (agyMode && (["default", "accept-edits", "plan"] as const).includes(agyMode as "default" | "accept-edits" | "plan"))
+  // 1.1.5 的 --mode 只接受 accept-edits/plan；旧配置 default 等价于不传 flag。
+  cfg.AGY_MODE = (agyMode && (["accept-edits", "plan"] as const).includes(agyMode as NonNullable<Cfg["AGY_MODE"]>))
     ? agyMode as Cfg["AGY_MODE"]
     : null;
   const agyPerm = envStr("MIXIN_AGY_PERMISSION", "bypass").trim();
@@ -212,9 +220,10 @@ export const EDITABLE: EditableEntry[] = [
   { key: "CLAUDE_DANGER_CONFIRM", env: "MIXIN_CLAUDE_DANGER_CONFIRM", kind: "bool", desc: "危险操作是否在聊天框问 y/n（开/关）" },
   { key: "CLAUDE_DANGER_PATTERNS", env: "MIXIN_CLAUDE_DANGER_PATTERNS", kind: "regexlist", desc: "危险命令模式（|| 分隔的正则，对 Bash 命令匹配）" },
   { key: "AGY_CLI_PATH", env: "MIXIN_AGY_CLI_PATH", kind: "str", allowEmpty: true, desc: "agy CLI 可执行路径（留空自动 PATH 查找）" },
-  { key: "AGY_MODEL", env: "MIXIN_AGY_MODEL", kind: "str", allowEmpty: true, desc: "agy 模型名（留空用 agy 默认）" },
+  { key: "AGY_MODEL", env: "MIXIN_AGY_MODEL", kind: "str", allowEmpty: true, desc: "agy 稳定模型 slug（留空用 agy 默认；1.1.5+ 推荐用 /model 选择）" },
+  { key: "AGY_EFFORT", env: "MIXIN_AGY_EFFORT", kind: "choice", allowEmpty: true, choices: ["low", "medium", "high"], desc: "agy 推理强度（low/medium/high；留空由模型决定，需 agy≥1.1.5）" },
   { key: "AGY_AGENT", env: "MIXIN_AGY_AGENT", kind: "str", allowEmpty: true, desc: "agy agent 名（留空用 agy 默认）" },
-  { key: "AGY_MODE", env: "MIXIN_AGY_MODE", kind: "choice", allowEmpty: true, choices: ["default", "accept-edits", "plan"], desc: "agy --mode（default/accept-edits/plan；留空不传）" },
+  { key: "AGY_MODE", env: "MIXIN_AGY_MODE", kind: "choice", allowEmpty: true, choices: ["default", "accept-edits", "plan"], desc: "agy --mode（accept-edits/plan；default 或留空均不传 flag）" },
   { key: "AGY_PERMISSION", env: "MIXIN_AGY_PERMISSION", kind: "choice", choices: ["bypass", "settings"], desc: "agy 权限策略：bypass=--dangerously-skip-permissions 全自动；settings=靠 agy settings.json 的 toolPermission/sandbox 控制（需 agy≥1.1.4）" },
 ];
 

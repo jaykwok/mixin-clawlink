@@ -113,6 +113,12 @@ const WIZARD_FIELDS: WField[] = [
   { label: "MAX_FILE_MB", get: () => String(cfg.MAX_FILE_MB), set: v => setValue("MAX_FILE_MB", v) },
   { label: "DANGER_CONFIRM（1/0）", get: () => (cfg.CLAUDE_DANGER_CONFIRM ? "1" : "0"), set: v => setValue("CLAUDE_DANGER_CONFIRM", v), choices: ["1", "0"] },
   { label: "DANGER_PATTERNS（用 || 分隔）", get: () => cfg.CLAUDE_DANGER_PATTERNS.join("||"), set: v => setValue("CLAUDE_DANGER_PATTERNS", v) },
+  { label: "AGY_CLI_PATH（留空=自动查找）", get: () => cfg.AGY_CLI_PATH ?? "", set: v => setValue("AGY_CLI_PATH", v) },
+  { label: "AGY_MODEL（1.1.5+ 稳定 slug；留空=默认）", get: () => cfg.AGY_MODEL ?? "", set: v => setValue("AGY_MODEL", v) },
+  { label: "AGY_EFFORT 推理强度（留空=默认）", get: () => cfg.AGY_EFFORT ?? "", set: v => setValue("AGY_EFFORT", v), choices: ["", "low", "medium", "high"] },
+  { label: "AGY_AGENT（留空=默认）", get: () => cfg.AGY_AGENT ?? "", set: v => setValue("AGY_AGENT", v) },
+  { label: "AGY_MODE（留空=默认）", get: () => cfg.AGY_MODE ?? "", set: v => setValue("AGY_MODE", v), choices: ["", "default", "accept-edits", "plan"] },
+  { label: "AGY_PERMISSION 权限策略", get: () => cfg.AGY_PERMISSION, set: v => setValue("AGY_PERMISSION", v), choices: ["bypass", "settings"] },
   { label: "QUANTUM_ACCOUNT（可选）", get: () => cfg.QUANTUM_ACCOUNT ?? "", set: v => writeEnvRaw("MIXIN_QUANTUM_ACCOUNT", v) },
   { label: "BOT_USER_ID（可选，anti-loop）", get: () => cfg.BOT_USER_ID ?? "", set: v => writeEnvRaw("MIXIN_BOT_USER_ID", v) },
 ];

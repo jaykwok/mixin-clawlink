@@ -112,7 +112,7 @@ export async function fetchModels(): Promise<ModelInfo[]> {
 
 /**
  * 从 agy CLI 获取模型列表（spawn `agy models`，解析纯文本输出）。
- * agy models 输出每行一个模型名（如 "Gemini 3.5 Flash (Medium)"），无 JSON。
+ * 兼容旧版“每行一个显示名”和 1.1.5+“稳定 slug + 显示名”输出。
  */
 export function fetchAgyModels(): ModelInfo[] {
   const cliPath = resolveAgyCliPath(cfg.AGY_CLI_PATH);
@@ -132,10 +132,49 @@ export function fetchAgyModels(): ModelInfo[] {
   }
   const out = (r.stdout || "").trim();
   if (!out) throw new Error("agy models 返回空输出");
-  const lines = out.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  const list: ModelInfo[] = lines.map(name => ({ id: name, name }));
-  log.info("agy models 返回 %d 个模型: %s", list.length, lines.join(", "));
+  const list = parseAgyModelsOutput(out);
+  log.info("agy models 返回 %d 个模型: %s", list.length, list.map(model => model.id).join(", "));
   if (!list.length) throw new Error("agy models 未返回任何模型");
+  return list;
+}
+
+/**
+ * 解析 agy models 文本。1.1.5 的稳定 slug 是持久配置值；显示名只用于 UI。
+ * 同时保留旧版逐行显示名作为 id，便于尚未升级的输出被友好识别。
+ */
+export function parseAgyModelsOutput(output: string): ModelInfo[] {
+  const ansi = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+  const list: ModelInfo[] = [];
+  const seen = new Set<string>();
+  for (const raw of output.replace(ansi, "").split(/\r?\n/)) {
+    let line = raw.trim();
+    if (!line
+      || /^(?:available\s+models?|models?)\s*:?$/i.test(line)
+      || /^fetching\s+available\s+models(?:\.{3}|…)?$/i.test(line)
+      || /^(?:model\s+)?slug\s+(?:display\s+)?name$/i.test(line)
+      || /^[─━=-]{3,}$/.test(line)) continue;
+    line = line.replace(/^(?:[*•-]|\d+[.)])\s+/, "").trim();
+
+    let id = line;
+    let name = line;
+    // 常见新版形态："Gemini 3.5 Flash (slug: gemini-3.5-flash)"。
+    const suffix = /^(.*?)\s+\((?:slug|model(?:\s+slug)?)\s*:\s*([a-z0-9][a-z0-9._-]*)\)$/i.exec(line);
+    if (suffix) {
+      name = suffix[1].trim();
+      id = suffix[2];
+    } else {
+      // 表格/分隔形态："gemini-3.5-flash  Gemini 3.5 Flash" 或 "slug — name"。
+      const columns = /^([a-z0-9][a-z0-9._-]*[._-][a-z0-9._-]*)\s+(?:(?:[-–—|])\s+|\s+)(.+)$/i.exec(line);
+      if (columns && !/^display[-_ ]?name$/i.test(columns[2].trim())) {
+        id = columns[1];
+        name = columns[2].trim();
+      }
+    }
+    if (!seen.has(id)) {
+      seen.add(id);
+      list.push(name && name !== id ? { id, name } : { id });
+    }
+  }
   return list;
 }
 

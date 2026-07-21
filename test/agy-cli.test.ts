@@ -2,7 +2,13 @@ import { expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { latestConversationId } from "../src/agents/agy-cli.ts";
+import { compareAgyVersions, latestConversationId } from "../src/agents/agy-cli.ts";
+
+test("compareAgyVersions 按 semver 三段比较 1.1.5 能力门槛", () => {
+  expect(compareAgyVersions("1.1.4", "1.1.5")).toBe(-1);
+  expect(compareAgyVersions("1.1.5", "1.1.5")).toBe(0);
+  expect(compareAgyVersions("1.2.0", "1.1.5")).toBe(1);
+});
 
 /**
  * 构造一个临时 HOME，里面放 agy 的 cache 文件，验证 latestConversationId 的孤儿过滤。

@@ -33,6 +33,7 @@ const COMMANDS: Record<string, string> = {
   "/del": "删除会话：/del 1 或 /del 1,3",
   "/config": "查看/修改配置：/config 或 /config <编号|名称> <值>",
   "/model": "查看/选择模型：/model 或 /model <编号|名称>，/model default 用默认",
+  "/effort": "查看/调整 agy 推理强度：/effort [low|medium|high|default]",
   "/reboot": "软重启（重读 .env、重建 agent/WS）",
   "/stop": "停止当前正在执行的任务",
   "/cwd": "查看/切换工作目录：/cwd 或 /cwd <绝对路径|相对根目录>",
@@ -223,9 +224,14 @@ export class Bot {
       const sessions = await registry.listSessions(uid);
       const active = sessions.find(s => s.active)?.num;
       const turns = await registry.countTurns(uid);
-      await send(`agent: ${this.agent.name}\n工作目录: ${wd}\n当前会话: ${active ? `第${active}个` : "无"}/${sessions.length}（${turns} 轮）`);
+      const agyState = isAgyAgent()
+        ? `\n模型: ${cfg.AGY_MODEL || "默认"}\n推理强度: ${cfg.AGY_EFFORT || "默认"}`
+        : "";
+      await send(`agent: ${this.agent.name}${agyState}\n工作目录: ${wd}\n当前会话: ${active ? `第${active}个` : "无"}/${sessions.length}（${turns} 轮）`);
     } else if (cmd === "/model") {
       await this.handleModel(uid, text);
+    } else if (cmd === "/effort") {
+      await this.handleEffort(uid, text);
     } else if (cmd === "/help") {
       const lines = ["命令列表:"];
       for (const [c, d] of Object.entries(COMMANDS)) lines.push(`${c} — ${d}`);
@@ -305,6 +311,29 @@ export class Bot {
       await send(`✅ 模型已切到 ${arg}（下条消息生效）。`);
     } catch (e) {
       await send(`⚠️ ${(e as Error).message}`);
+    }
+  }
+
+  /** agy 1.1.5+ /effort：热改下次 headless 启动所用的 reasoning effort。 */
+  private async handleEffort(uid: string, text: string): Promise<void> {
+    const send = (s: string) => this.pipe.sendText(uid, s);
+    if (!isAgyAgent()) {
+      await send("⚠️ /effort 仅在 AGENT=antigravity 时可用。");
+      return;
+    }
+    const arg = text.slice(text.indexOf(" ") >= 0 ? text.indexOf(" ") + 1 : text.length).trim().toLowerCase();
+    if (!arg) {
+      await send(`当前推理强度: ${cfg.AGY_EFFORT || "默认（由模型决定）"}\n可选: low / medium / high\n用法: /effort <level>，/effort default 恢复默认`);
+      return;
+    }
+    const value = arg === "default" || arg === "默认" ? "" : arg;
+    try {
+      const normalized = setValue("AGY_EFFORT", value);
+      await send(normalized
+        ? `✅ 推理强度已切到 ${normalized}（下条消息生效）。`
+        : "✅ 已恢复默认推理强度（下条消息生效）。");
+    } catch (e) {
+      await send(`⚠️ ${(e as Error).message}\n可选: low / medium / high / default`);
     }
   }
 
@@ -514,4 +543,9 @@ function fmtModels(models: ModelInfo[], current: string | null, sourceLabel: str
 
 function mask(s: string): string {
   return s.length > 8 ? s.slice(0, 6) + "***" : "***";
+}
+
+function isAgyAgent(): boolean {
+  const agent = cfg.AGENT.toLowerCase();
+  return agent === "antigravity" || agent === "agy";
 }

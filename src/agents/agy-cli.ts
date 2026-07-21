@@ -209,3 +209,14 @@ export function detectAgyVersion(cliPath: string): string | null {
     return null;
   }
 }
+
+/** 比较 semver 主/次/补丁版本；仅用于 agy 已解析出的三段版本号。 */
+export function compareAgyVersions(left: string, right: string): number {
+  const a = left.split(".").map(Number);
+  const b = right.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    const delta = (a[i] || 0) - (b[i] || 0);
+    if (delta !== 0) return delta < 0 ? -1 : 1;
+  }
+  return 0;
+}

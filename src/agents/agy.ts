@@ -2,7 +2,7 @@
  * agy CLI 适配器（headless 子进程模式）。
  *
  * agy（Antigravity CLI）没有等价 SDK，只能走终端 --print 模式：
- *   agy --print "prompt" --dangerously-skip-permissions [--conversation <uuid>] [--model <m>] [--agent <a>]
+ *   agy --print "prompt" --dangerously-skip-permissions [--conversation <uuid>] [--model <slug>] [--effort <level>] [--agent <a>]
  *
  * - 多轮记忆：首轮不续；跑完扫 ~/.gemini/antigravity-cli/conversations/ 取最新 .db 的 uuid
  *   存进 registry。续轮用 --conversation <uuid> 精确续接。
@@ -15,10 +15,10 @@
  */
 import { extname } from "node:path";
 import { spawn } from "node:child_process";
-import { cfg } from "../config.ts";
+import { cfg, type Cfg } from "../config.ts";
 import { getLogger } from "../logger.ts";
 import type { Agent, ReplyOpts, ReplyResult } from "./base.ts";
-import { resolveAgyCliPath, latestConversationId, detectAgyVersion, isAgyAuthenticated } from "./agy-cli.ts";
+import { compareAgyVersions, resolveAgyCliPath, latestConversationId, detectAgyVersion, isAgyAuthenticated } from "./agy-cli.ts";
 
 const log = getLogger("agent:agy");
 const IMG_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
@@ -41,6 +41,9 @@ export class AgyAgent implements Agent {
     this.agyCliPath = path;
     const version = detectAgyVersion(path);
     log.info("使用本机 agy CLI: %s%s", path, version ? ` (v${version})` : "");
+    if (version && compareAgyVersions(version, "1.1.5") < 0) {
+      throw new Error(`agy 版本过低：当前 v${version}，本适配器的新模型 slug 与 --effort 功能需要 v1.1.5 或更高版本。`);
+    }
 
     // 认证检测：agy 需要浏览器 OAuth 登录，headless 模式下无法完成
     if (!isAgyAuthenticated()) {
@@ -56,8 +59,8 @@ export class AgyAgent implements Agent {
     const promptText = buildPrompt(text, others, images, workspace);
 
     const hasHistory = !!opts.sessionId;
-    log.info("agy query: cwd=%s model=%s agent=%s imgs=%d conv=%s",
-      workspace, cfg.AGY_MODEL || "(默认)", cfg.AGY_AGENT || "(默认)", images.length, hasHistory ? opts.sessionId!.slice(0, 8) + "…" : "(新)");
+    log.info("agy query: cwd=%s model=%s effort=%s agent=%s imgs=%d conv=%s",
+      workspace, cfg.AGY_MODEL || "(默认)", cfg.AGY_EFFORT || "(默认)", cfg.AGY_AGENT || "(默认)", images.length, hasHistory ? opts.sessionId!.slice(0, 8) + "…" : "(新)");
 
     // 首轮：无 --conversation；续轮：带 --conversation <uuid>
     const convId = hasHistory ? opts.sessionId! : null;
@@ -114,14 +117,7 @@ function runAgyPrint(
   abortController?: AbortController,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const args = ["--print", prompt];
-    // 权限策略：bypass=--dangerously-skip-permissions 全自动；
-    // settings=不传该 flag，靠 agy settings.json 的 toolPermission/sandbox 控制（需 agy≥1.1.4）。
-    if (cfg.AGY_PERMISSION !== "settings") args.push("--dangerously-skip-permissions");
-    if (convId) args.push("--conversation", convId);
-    if (cfg.AGY_MODEL) args.push("--model", cfg.AGY_MODEL);
-    if (cfg.AGY_AGENT) args.push("--agent", cfg.AGY_AGENT);
-    if (cfg.AGY_MODE) args.push("--mode", cfg.AGY_MODE);
+    const args = buildAgyArgs(prompt, convId, cfg);
 
     log.info("spawn: %s %s", cliPath || "agy", args.map(a => a.includes(" ") ? `"${a}"` : a).join(" "));
 
@@ -210,6 +206,21 @@ function runAgyPrint(
       finish(null, stdout);
     });
   });
+}
+
+type AgyArgConfig = Pick<Cfg, "AGY_PERMISSION" | "AGY_MODEL" | "AGY_EFFORT" | "AGY_AGENT" | "AGY_MODE">;
+
+/** 构造 headless 启动参数，单独导出以验证 1.1.5 的 model/effort 透传。 */
+export function buildAgyArgs(prompt: string, convId: string | null, options: AgyArgConfig): string[] {
+  const args = ["--print", prompt];
+  // settings=不传 bypass flag，靠 agy settings.json 的 toolPermission/sandbox 控制。
+  if (options.AGY_PERMISSION !== "settings") args.push("--dangerously-skip-permissions");
+  if (convId) args.push("--conversation", convId);
+  if (options.AGY_MODEL) args.push("--model", options.AGY_MODEL);
+  if (options.AGY_EFFORT) args.push("--effort", options.AGY_EFFORT);
+  if (options.AGY_AGENT) args.push("--agent", options.AGY_AGENT);
+  if (options.AGY_MODE) args.push("--mode", options.AGY_MODE);
+  return args;
 }
 
 function buildPrompt(text: string, others: string[], images: string[], workspace: string): string {
