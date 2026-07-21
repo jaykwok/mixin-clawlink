@@ -66,17 +66,22 @@ function lastConversationsCachePath(): string {
   return resolve(agyDataDir(), "cache", "last_conversations.json");
 }
 
-/** agy 会话元数据文件路径（按 uuid 索引，含 WorkspaceURIs/Title/last_modified_time，比缓存更可靠）。 */
+/** agy 会话元数据文件路径（1.1.5 中可能滞后于 last_conversations 与实际 db）。 */
 function conversationMetadataPath(): string {
   return resolve(agyDataDir(), "cache", "conversation_metadata.json");
 }
 
+function conversationDbPath(uuid: string): string {
+  return resolve(conversationsDir(), `${uuid}.db`);
+}
+
 /**
  * 校验 conversation uuid 是否真实存在（非孤儿）。
- * 读 conversation_metadata.json，检查 uuid 是否在 conversations 映射里。
- * metadata 文件不存在或解析失败时返回 true（宽松校验，不阻断）。
+ * 1.1.5 可能已写入 db/last_conversations，却尚未把 ID 写进 metadata；因此实际 db
+ * 优先于 metadata。只有 metadata 明确缺失该 ID且 db 也不存在时才判为孤儿。
  */
 function isConversationAlive(uuid: string): boolean {
+  if (existsSync(conversationDbPath(uuid))) return true;
   try {
     const raw = readFileSync(conversationMetadataPath(), "utf8");
     const meta = JSON.parse(raw) as { conversations?: Record<string, unknown> };
@@ -120,7 +125,7 @@ export function isAgyAuthenticated(): boolean {
 /**
  * 读 last_conversations.json，按 workspace 路径查 conversation uuid。
  * agy 会话按 cwd 隔离，这个缓存文件是精确映射。
- * 查到后再用 conversation_metadata.json 校验 uuid 是否仍存活，避免续接到已删除的孤儿会话。
+ * 查到后用实际 db + metadata 校验 uuid 是否仍存活，避免续接到已删除的孤儿会话。
  */
 function conversationIdByWorkspace(workspace: string): string | null {
   const cacheFile = lastConversationsCachePath();
@@ -134,7 +139,7 @@ function conversationIdByWorkspace(workspace: string): string | null {
   const key = resolve(workspace);
   const id = map[key];
   if (!id) return null;
-  // 校验存活：metadata 里不存在说明是孤儿 uuid（会话已删），不返回它
+  // 1.1.5 的 metadata 可能滞后；实际 db 存在即可续接。
   return isConversationAlive(id) ? id : null;
 }
 
@@ -167,7 +172,7 @@ function latestConversationIdFromDir(): string | null {
   if (!best) return null;
   const base = best.name.replace(/\.db$/i, "");
   if (!base) return null;
-  // 校验存活：metadata 里不存在说明是孤儿，不返回
+  // 校验存活：实际 db 存在优先；metadata 仅作为补充。
   return isConversationAlive(base) ? base : null;
 }
 

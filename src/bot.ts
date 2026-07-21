@@ -11,6 +11,7 @@ import { expandHome } from "./config.ts";
 import { makeAgent } from "./agents/index.ts";
 import type { Agent } from "./agents/base.ts";
 import { fetchAgentModels, type ModelInfo } from "./agents/models.ts";
+import { initAgentInstructions, needsAgentInstructions } from "./agents/instructions.ts";
 import { TokenManager } from "./im/auth.ts";
 import { MessagePipe } from "./im/messages.ts";
 import type { InboundMessage } from "./im/messages.ts";
@@ -34,6 +35,7 @@ const COMMANDS: Record<string, string> = {
   "/config": "查看/修改配置：/config 或 /config <编号|名称> <值>",
   "/model": "查看/选择模型：/model 或 /model <编号|名称>，/model default 用默认",
   "/effort": "查看/调整 agy 推理强度：/effort [low|medium|high|default]",
+  "/init": "初始化当前工作区的 Agent 规则文件（可重复安全执行）",
   "/reboot": "软重启（重读 .env、重建 agent/WS）",
   "/stop": "停止当前正在执行的任务",
   "/cwd": "查看/切换工作目录：/cwd 或 /cwd <绝对路径|相对根目录>",
@@ -58,6 +60,7 @@ export class Bot {
   private readonly locks = new Map<string, Promise<void>>();
   private readonly running = new Map<string, AbortController>(); // uid -> 当前任务的 AbortController
   private readonly pending = new Map<string, (allow: boolean) => void>(); // uid -> 审批 resolver
+  private readonly initReminded = new Set<string>(); // 每次进程生命周期每用户只提醒一次
   private serveResolve: (() => void) | null = null;
   private stopped = false;
 
@@ -141,6 +144,18 @@ export class Bot {
       return;
     }
 
+    // 首次使用提示：不拦截原消息；/init 本身不再额外提示。
+    if (!this.initReminded.has(uid) && !/^\/init(?:\s|$)/i.test(text)) {
+      this.initReminded.add(uid);
+      try {
+        if (await needsAgentInstructions(this.agent.name, this.workspace.currentDir(uid))) {
+          await this.pipe.sendTip(uid, "💡 当前工作区尚未初始化 Mixin ClawLink Agent 规则。建议发送 /init，写入文件回传等基础协议（不会覆盖已有文档）。");
+        }
+      } catch (error) {
+        log.warn("检查 Agent 规则初始化状态失败: %s", (error as Error).message);
+      }
+    }
+
     // 斜杠命令：直接处理，不进 agent、不占用户锁
     if (text.startsWith("/")) {
       await this.handleCommand(msg, text);
@@ -193,6 +208,20 @@ export class Bot {
       }
     } else if (cmd === "/config") {
       await this.handleConfig(uid, text);
+    } else if (cmd === "/init") {
+      const cwd = this.workspace.currentDir(uid);
+      try {
+        const result = await initAgentInstructions(this.agent.name, cwd);
+        if (!result) {
+          await send(`⚠️ 当前 agent=${this.agent.name} 没有对应的规则文档；请先切换到 claude 或 antigravity。`);
+        } else if (result.changed) {
+          await send(`✅ 已初始化 Agent 规则：${result.path}\n已加入文件回传与 ClawLink 斜杠命令约定；重复执行 /init 不会重复追加。`);
+        } else {
+          await send(`✅ 已初始化，无需重复写入：${result.path}`);
+        }
+      } catch (error) {
+        await send(`⚠️ 初始化失败: ${(error as Error).message}`);
+      }
     } else if (cmd === "/reboot") {
       log.info("用户 %s 请求软重启", mask(uid));
       await send("🔄 软重启中（重读 .env、重建 agent/WS，几秒后恢复）…");

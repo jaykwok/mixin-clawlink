@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { buildAgyArgs } from "../src/agents/agy.ts";
+import { buildAgyArgs, buildAgyPrompt } from "../src/agents/agy.ts";
 import { parseAgyModelsOutput } from "../src/agents/models.ts";
 
 test("headless 启动参数透传 1.1.5 model slug 与 effort", () => {
@@ -28,6 +28,20 @@ test("默认 effort 不传 flag，settings 权限不传 bypass", () => {
     AGY_AGENT: null,
     AGY_MODE: null,
   })).toEqual(["--print", "ping"]);
+});
+
+test("agy prompt 注入系统提示和文件回传协议", () => {
+  const prompt = buildAgyPrompt(
+    "请把报告发给我",
+    [],
+    [],
+    "D:\\work",
+    "请用中文回复。",
+    "回复末尾输出 [[FILE: 文件的绝对路径]]。",
+  );
+  expect(prompt).toContain("【系统指令】\n请用中文回复。");
+  expect(prompt).toContain("[[FILE: 文件的绝对路径]]");
+  expect(prompt).toContain("请把报告发给我");
 });
 
 test("解析 1.1.5 稳定 slug 模型列表并保留显示名", () => {

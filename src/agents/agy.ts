@@ -56,7 +56,7 @@ export class AgyAgent implements Agent {
   async reply(uid: string, text: string, workspace: string, attachments: string[], opts: ReplyOpts = {}): Promise<ReplyResult> {
     const images = attachments.filter(a => IMG_EXTS.has(extname(a).toLowerCase()));
     const others = attachments.filter(a => !IMG_EXTS.has(extname(a).toLowerCase()));
-    const promptText = buildPrompt(text, others, images, workspace);
+    const promptText = buildAgyPrompt(text, others, images, workspace);
 
     const hasHistory = !!opts.sessionId;
     log.info("agy query: cwd=%s model=%s effort=%s agent=%s imgs=%d conv=%s",
@@ -223,8 +223,18 @@ export function buildAgyArgs(prompt: string, convId: string | null, options: Agy
   return args;
 }
 
-function buildPrompt(text: string, others: string[], images: string[], workspace: string): string {
-  const out: string[] = [`（你的工作目录是 ${workspace}；不确定路径时先用 pwd/ls 确认，不要凭记忆回答路径。）`];
+export function buildAgyPrompt(
+  text: string,
+  others: string[],
+  images: string[],
+  workspace: string,
+  systemPrompt = cfg.SYSTEM_PROMPT,
+  fileReturnInstruction = cfg.FILE_RETURN_INSTRUCTION,
+): string {
+  const out: string[] = [];
+  if (systemPrompt.trim()) out.push(`【系统指令】\n${systemPrompt.trim()}`);
+  if (fileReturnInstruction.trim()) out.push(fileReturnInstruction.trim());
+  out.push(`（你的工作目录是 ${workspace}；不确定路径时先用 pwd/ls 确认，不要凭记忆回答路径。）`);
   out.push(text || "(用户发来了附件)");
   if (images.length) out.push("(用户发来了图片，见下方消息内容。)");
   if (others.length) {

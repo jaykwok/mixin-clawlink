@@ -58,6 +58,22 @@ test("缓存命中但 uuid 在 metadata 中不存在 → 视为孤儿返回 null
   });
 });
 
+test("agy 1.1.5 metadata 滞后但 conversation db 存在时仍可续接", () => {
+  withTempHome(home => {
+    const dataDir = resolve(home, ".gemini", "antigravity-cli");
+    const cacheDir = resolve(dataDir, "cache");
+    const conversationsDir = resolve(dataDir, "conversations");
+    mkdirSync(cacheDir, { recursive: true });
+    mkdirSync(conversationsDir, { recursive: true });
+    const ws = "D:\\网信安";
+    const uuid = "72ada736-4755-4edf-861d-d9dae9d0fdf9";
+    writeFileSync(join(cacheDir, "last_conversations.json"), JSON.stringify({ [ws]: uuid }));
+    writeFileSync(join(cacheDir, "conversation_metadata.json"), JSON.stringify({ conversations: {} }));
+    writeFileSync(join(conversationsDir, `${uuid}.db`), "agy conversation db placeholder");
+    expect(latestConversationId(ws)).toBe(uuid);
+  });
+});
+
 test("metadata 文件缺失时不阻断（宽松放行，兼容旧版 agy）", () => {
   withTempHome(home => {
     const cacheDir = resolve(home, ".gemini", "antigravity-cli", "cache");
