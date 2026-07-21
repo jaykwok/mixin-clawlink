@@ -178,12 +178,16 @@ export class Bot {
         await send("⚠️ 用法: /del 1 或 /del 1,3");
       } else {
         this.stopRunning(uid);
-        const { deleted, activeDeleted, remaining } = await registry.deleteSessions(uid, nums);
+        const { deleted, activeDeleted, remaining, deletedNums } = await registry.deleteSessions(uid, nums);
+        const label = deletedNums.map(n => `#${n}`).join(" ");
         if (deleted === 0) {
           await send("⚠️ 没有这些编号的会话，/list 看看。");
+        } else if (activeDeleted && remaining === 1) {
+          // 删的是唯一会话 → 删光后新开；剩余的就是新开的，不提"剩余1个"免得让人困惑
+          await send(`🗑 已删除会话 ${label}，已新开一个。`);
         } else {
           const extra = activeDeleted ? "（当前会话被删，已新开一个）" : "";
-          await send(`🗑 已删除 ${deleted} 个会话，剩余 ${remaining} 个。${extra}`);
+          await send(`🗑 已删除会话 ${label}，剩余 ${remaining} 个。${extra}`);
         }
       }
     } else if (cmd === "/config") {

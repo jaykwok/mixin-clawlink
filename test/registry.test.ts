@@ -22,9 +22,10 @@ test("deleteSessions 删光后自动新开一个会话（保持 ≥1）", async 
   const uid = "u-delall";
   await registry.newSession(uid);
   expect((await registry.listSessions(uid)).length).toBe(1);
-  const { deleted, remaining } = await registry.deleteSessions(uid, [1]);
+  const { deleted, remaining, deletedNums } = await registry.deleteSessions(uid, [1]);
   expect(deleted).toBe(1);
   expect(remaining).toBe(1); // 删光后自动建新，仍 ≥1
+  expect(deletedNums).toEqual([1]);
   expect((await registry.listSessions(uid)).length).toBe(1);
 });
 

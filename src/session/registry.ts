@@ -166,16 +166,18 @@ class Registry {
   }
 
   /** 按编号删除（从大到小删，避免索引错位）。删的是当前活动会话时，统一行为：新开一个并切到它。 */
-  async deleteSessions(uid: string, nums: number[]): Promise<{ deleted: number; activeDeleted: boolean; remaining: number }> {
+  async deleteSessions(uid: string, nums: number[]): Promise<{ deleted: number; activeDeleted: boolean; remaining: number; deletedNums: number[] }> {
     const idx = await this.read(uid);
     const sessions = idx.sessions;
     let deleted = 0;
     let activeDeleted = false;
+    const deletedNums: number[] = [];
     for (const n of [...new Set(nums)].sort((a, b) => b - a)) {
       if (n >= 1 && n <= sessions.length) {
         const s = sessions.splice(n - 1, 1)[0];
         if (s.id === idx.active) activeDeleted = true;
         deleted++;
+        deletedNums.push(n);
       }
     }
     if (activeDeleted) {
@@ -192,7 +194,7 @@ class Registry {
       }
     }
     await this.write(uid, idx);
-    return { deleted, activeDeleted, remaining: idx.sessions.length };
+    return { deleted, activeDeleted, remaining: idx.sessions.length, deletedNums: deletedNums.sort((a, b) => a - b) };
   }
 
   async countTurns(uid: string): Promise<number> {
