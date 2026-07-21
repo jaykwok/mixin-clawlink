@@ -118,8 +118,8 @@ class Registry {
   }
 
   async listSessions(uid: string): Promise<SessionInfo[]> {
-    // 只读不建：新用户 /list 不应产生 index.json 副作用（ensure 会建槽）
-    const idx = await this.read(uid);
+    // ensure：保证 ≥1 会话，/list 永远有内容可显示（避免 0 会话时无回应）
+    const idx = await this.ensure(uid);
     return idx.sessions.map((s, i) => ({ num: i + 1, title: s.title, turns: s.turns, active: s.id === idx.active }));
   }
 
@@ -165,7 +165,7 @@ class Registry {
     }
   }
 
-  /** 按编号删除（从大到小删，避免索引错位）。 */
+  /** 按编号删除（从大到小删，避免索引错位）。删光后自动新开一个会话，保持系统始终 ≥1 会话。 */
   async deleteSessions(uid: string, nums: number[]): Promise<{ deleted: number; activeDeleted: boolean; remaining: number }> {
     const idx = await this.read(uid);
     const sessions = idx.sessions;
@@ -178,11 +178,17 @@ class Registry {
         deleted++;
       }
     }
-    if (sessions.length === 0 || activeDeleted || !sessions.some(s => s.id === idx.active)) {
+    // active 失效（被删或原本无效）→ 指向最近一个
+    if (!sessions.some(s => s.id === idx.active)) {
       idx.active = sessions.length ? sessions[sessions.length - 1].id : null;
     }
+    // 全删光时自动新开一个会话：系统始终保持 ≥1 会话，避免 0 会话状态（/list 无回应、active 悬空等）
+    if (sessions.length === 0) {
+      idx.sessions.push({ id: newSlotId(), sessionId: null, title: PLACEHOLDER, created: Date.now(), turns: 0 });
+      idx.active = idx.sessions[0].id;
+    }
     await this.write(uid, idx);
-    return { deleted, activeDeleted, remaining: sessions.length };
+    return { deleted, activeDeleted, remaining: idx.sessions.length };
   }
 
   async countTurns(uid: string): Promise<number> {

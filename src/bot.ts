@@ -179,8 +179,12 @@ export class Bot {
       } else {
         this.stopRunning(uid);
         const { deleted, activeDeleted, remaining } = await registry.deleteSessions(uid, nums);
-        const extra = activeDeleted ? "（当前会话被删，已切到最近一个）" : "";
-        await send(`🗑 已删除 ${deleted} 个会话，剩余 ${remaining} 个。${extra}`);
+        if (deleted === 0) {
+          await send("⚠️ 没有这些编号的会话，/list 看看。");
+        } else {
+          const extra = activeDeleted ? "（当前会话被删，已切到最近一个）" : "";
+          await send(`🗑 已删除 ${deleted} 个会话，剩余 ${remaining} 个。${extra}`);
+        }
       }
     } else if (cmd === "/config") {
       await this.handleConfig(uid, text);

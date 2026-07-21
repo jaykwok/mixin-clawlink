@@ -85,7 +85,7 @@ let renderer: any = null;
 let wizardResolve: (() => void) | null = null;
 let wizardDone = false;
 let wizardFromPanel = false;
-let quitFn: () => void = () => {};
+let quitFn: () => void = () => { };
 let resizeHandler: (() => void) | null = null;
 let replaceOnFirstEdit = false;
 
@@ -250,7 +250,7 @@ function openConfigEditor(): void {
 }
 function cancelWizard(): void {
   if (!wizardFromPanel) {
-    setStatusMsg("首次运行尚无可返回的面板；请完成配置，或按 q 退出");
+    setStatusMsg("首次运行尚无可返回的面板；请完成配置，或按 Q 退出");
     return;
   }
   wizardFromPanel = false;
@@ -746,14 +746,14 @@ function hints(): string {
   if (compact && mode() === "wizard") return wizardFocus() === "fields"
     ? "Enter 进入编辑 · ↑↓/1-9 选择 · PgUp/Dn 翻页 · Esc 返回"
     : WIZARD_FIELDS[fIdx()].choices?.length ? "↑↓ 选择 · Enter 保存 · Esc 放弃" : "输入/Ctrl+V 编辑 · Enter 保存 · Esc 放弃";
-  if (compact && view() === "logs") return "Tab/←→ 切视图 · Ctrl+B 后台 · q 退出";
+  if (compact && view() === "logs") return "Tab/←→ 切视图 · Ctrl+B 后台 · Q 退出";
   if (compact) return "1-9 执行 · ↑↓ 选择 · PgUp/Dn 翻页 · Esc 返回";
   if (mode() === "wizard") return wizardFocus() === "fields"
     ? `选中字段后按 Enter 进入编辑 · ↑↓/1-9 选择字段 · PgUp/Dn 翻页 · Ctrl+S ${wizardFromPanel ? "完成" : "保存启动"} · Esc 返回`
     : WIZARD_FIELDS[fIdx()].choices?.length
       ? "↑↓/←→ 切换选项 · Enter 保存返回字段列表 · Esc 放弃编辑"
       : "直接输入或 Ctrl+V 粘贴 · Enter 保存返回字段列表 · Esc 放弃编辑";
-  if (view() === "logs") return "Tab/←→ 切换视图 · 鼠标选中后右键复制 · Ctrl+B 托盘后台 · q 退出";
+  if (view() === "logs") return "Tab/←→ 切换视图 · 鼠标选中后右键复制 · Ctrl+B 托盘后台 · Q 退出";
   if (view() === "sessions") {
     const f = sessionFocus();
     if (f === "users") return "↑↓/jk 选用户 · Enter 查看会话 · 1-9 快选 · t 测试 · Tab 切视图 · Esc 日志";
@@ -904,7 +904,7 @@ export async function startTui(opts: { onQuit: () => void }): Promise<TuiHandle>
   });
   const flush = setInterval(() => { if (dirty) { dirty = false; setLogs([...ring]); } }, 120);
   const authTimer = setInterval(() => { if (currentBot) setAuthStatus(currentBot.getAuthStatus()); }, 1000);
-  const usersTimer = setInterval(() => { void registry.listUsers().then(us => setUserCount(us.length)).catch(() => {}); }, 5000);
+  const usersTimer = setInterval(() => { void registry.listUsers().then(us => setUserCount(us.length)).catch(() => { }); }, 5000);
   const trayExitFile = process.env.MIXIN_TRAY_EXIT_FILE;
   const trayTimer = setInterval(() => {
     if (!trayExitFile || !existsSync(trayExitFile)) return;
