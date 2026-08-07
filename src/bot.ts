@@ -190,7 +190,7 @@ export class Bot {
     } else if (cmd === "/reset") {
       this.stopRunning(uid);
       await registry.resetSession(uid);
-      await send("🧹 已清空当前会话（下次对话开新 claude session）。");
+      await send(`🧹 已清空当前会话（下次对话开启新的 ${this.agent.name} session）。`);
     } else if (cmd === "/del") {
       const nums = parseIntList(text);
       if (!nums.length) {
@@ -482,7 +482,7 @@ export class Bot {
       }
     }
 
-    // 2) 记首条消息作标题 + 取当前槽位 claude sessionId（供 resume）
+    // 2) 记首条消息作标题 + 取当前槽位的原生 agent sessionId（供 resume）
     const userText = attachFailed
       ? (msg.text ? `${msg.text}\n（注：你发的附件下载失败，无法读取，请基于文字内容回复。）` : "(用户发来了附件，但下载失败，无法读取)")
       : (msg.text || "(用户发来了附件)");

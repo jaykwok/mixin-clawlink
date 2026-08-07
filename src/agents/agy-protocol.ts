@@ -35,6 +35,8 @@ export interface AgyResult {
   conversationId?: string;
   status?: string;
   response: string;
+  /** terminal result 的失败原因；agy 在结构化输出可用时也可能同时返回此字段。 */
+  error?: string;
   structured?: AgyStructuredReply;
   meta: AgentRunMeta;
 }
@@ -44,6 +46,8 @@ export interface AgyStreamSummary {
   conversationId?: string;
   rawOutput: string;
   progress: AgentProgress[];
+  /** 仅汇总本次 stream 中出现的 DONE step，避免续接会话的 terminal 累计指标。 */
+  invocationMeta: AgentRunMeta;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -96,6 +100,7 @@ export function parseAgyResult(value: unknown): AgyResult | undefined {
     conversationId: nonEmptyString(obj.conversation_id),
     status: nonEmptyString(obj.status),
     response: response.trim(),
+    error: nonEmptyString(obj.error),
     structured,
     meta: {
       durationSeconds: finiteNumber(obj.duration_seconds),
@@ -150,6 +155,7 @@ export class AgyStreamParser {
   private readonly emittedTools = new Set<string>();
   private readonly emittedSubagents = new Set<string>();
   private readonly progressEvents: AgentProgress[] = [];
+  private readonly completedSteps = new Map<string, { type: string; durationSeconds?: number; usage?: AgentUsage }>();
   private resultValue?: AgyResult;
   private conversationIdValue?: string;
 
@@ -176,6 +182,7 @@ export class AgyStreamParser {
       conversationId: resultConversation ?? this.conversationIdValue,
       rawOutput: this.raw,
       progress: [...this.progressEvents],
+      invocationMeta: this.buildInvocationMeta(),
     };
   }
 
@@ -206,7 +213,31 @@ export class AgyStreamParser {
     if (event.event !== "step_update") return;
     const step = record(event.step_update);
     if (!step) return;
+    this.recordCompletedStep(step);
     this.consumeStep(step);
+  }
+
+  private recordCompletedStep(step: Record<string, unknown>): void {
+    if (String(step.state ?? "").toUpperCase() !== "DONE") return;
+    const conversationId = nonEmptyString(step.conversation_id) ?? this.conversationIdValue ?? "unknown";
+    const index = String(step.step_index ?? "unknown");
+    this.completedSteps.set(`${conversationId}:${index}`, {
+      type: String(step.step_type ?? "").toLowerCase(),
+      durationSeconds: finiteNumber(step.duration_seconds),
+      usage: parseUsage(step.usage),
+    });
+  }
+
+  private buildInvocationMeta(): AgentRunMeta {
+    const steps = [...this.completedSteps.values()];
+    const durations = steps.map(step => step.durationSeconds).filter((v): v is number => v !== undefined);
+    const usage = sumUsage(steps.map(step => step.usage));
+    const numTurns = steps.filter(step => step.type === "user_input").length;
+    return {
+      durationSeconds: durations.length ? durations.reduce((sum, value) => sum + value, 0) : undefined,
+      numTurns: numTurns || undefined,
+      usage,
+    };
   }
 
   private consumeStep(step: Record<string, unknown>): void {
@@ -246,4 +277,23 @@ export class AgyStreamParser {
     this.progressEvents.push(event);
     try { this.onProgress?.(event); } catch { /* 进度观察者不得中断 stdout。 */ }
   }
+}
+
+function sumUsage(values: Array<AgentUsage | undefined>): AgentUsage | undefined {
+  const result: AgentUsage = {};
+  const keys: Array<keyof AgentUsage> = [
+    "inputTokens",
+    "outputTokens",
+    "thinkingTokens",
+    "cacheReadTokens",
+    "totalTokens",
+  ];
+  for (const usage of values) {
+    if (!usage) continue;
+    for (const key of keys) {
+      const value = usage[key];
+      if (value !== undefined) result[key] = (result[key] ?? 0) + value;
+    }
+  }
+  return Object.values(result).some(value => value !== undefined) ? result : undefined;
 }

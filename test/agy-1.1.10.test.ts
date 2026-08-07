@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
-import { buildAgyArgs, buildAgyPrompt } from "../src/agents/agy.ts";
+import { agyResultToReply, applyInvocationMeta, buildAgyArgs, buildAgyPrompt } from "../src/agents/agy.ts";
 import {
   AGY_REPLY_SCHEMA,
   AgyStreamParser,
@@ -62,6 +62,7 @@ test("解析 1.1.10 --output-format json 的真实输出", () => {
     conversationId: "7175a105-c096-4a02-bc23-e4a745c0579c",
     status: "SUCCESS",
     response: "PONG",
+    error: undefined,
     structured: undefined,
     meta: {
       durationSeconds: 3.0227077,
@@ -89,6 +90,61 @@ test("JSON Schema structured_output 提供正文和去重后的文件列表", ()
     status: "SUCCESS",
     response: '{"text":"字符串结构结果","files":[]}',
   })?.structured).toEqual({ text: "字符串结构结果", files: [] });
+});
+
+test("真实异常形态：status=ERROR 但 response 是有效 schema 时保留回复", () => {
+  const result = parseAgyResult({
+    conversation_id: "06db4681-22e8-4917-aade-80254c6691ec",
+    status: "ERROR",
+    response: '{"files":[],"text":"您好！请问有什么我可以帮您的？"}',
+    error: "error executing cascade step: CORTEX_STEP_TYPE_RUN_COMMAND: D:\\网信安\\scratch: no such directory",
+  });
+  expect(result).toBeDefined();
+  expect(result?.error).toContain("CORTEX_STEP_TYPE_RUN_COMMAND");
+  expect(agyResultToReply(result!)).toMatchObject({
+    text: "您好！请问有什么我可以帮您的？",
+    files: [],
+    sessionId: "06db4681-22e8-4917-aade-80254c6691ec",
+  });
+});
+
+test("status=ERROR 且没有任何可用结果时仍抛错", () => {
+  const result = parseAgyResult({ status: "ERROR", response: "", error: "模型不可用" });
+  expect(() => agyResultToReply(result!)).toThrow("没有可用结果：模型不可用");
+});
+
+test("真实续接异常流：保留 error，并用当前 DONE step 隔离历史累计指标", () => {
+  const parser = new AgyStreamParser();
+  const stream = [
+    { event: "init", conversation_id: "06db4681-22e8-4917-aade-80254c6691ec", init: { cwd: "D:\\mixin\\workspace" } },
+    { event: "step_update", step_update: { conversation_id: "06db4681-22e8-4917-aade-80254c6691ec", step_index: 171, state: "DONE", step_type: "user_input" } },
+    { event: "step_update", step_update: { conversation_id: "06db4681-22e8-4917-aade-80254c6691ec", step_index: 173, state: "DONE", step_type: "agent_response", text_delta: '{"files":[],"text":"续接测试成功"}\n', duration_seconds: 2.6848235, usage: { input_tokens: 88891, output_tokens: 69, thinking_tokens: 49, cache_read_tokens: 8162, total_tokens: 88960 } } },
+    { event: "step_update", step_update: { conversation_id: "06db4681-22e8-4917-aade-80254c6691ec", step_index: 174, state: "DONE", step_type: "finish", duration_seconds: 0.0862671 } },
+    { event: "result", result: { conversation_id: "06db4681-22e8-4917-aade-80254c6691ec", status: "ERROR", response: '{"files":[],"text":"续接测试成功"}\n', error: "error executing cascade step: CORTEX_STEP_TYPE_RUN_COMMAND: D:\\网信安\\scratch: no such directory", duration_seconds: 1455773.2667082, num_turns: 9, structured_output: { files: [], text: "续接测试成功" }, usage: { input_tokens: 845915, output_tokens: 27559, thinking_tokens: 12254, cache_read_tokens: 3544066, total_tokens: 873474 } } },
+  ].map(value => JSON.stringify(value)).join("\n") + "\n";
+  parser.push(Buffer.from(stream, "utf8"));
+  const summary = parser.finish();
+
+  expect(summary.result?.error).toContain("D:\\网信安\\scratch");
+  expect(summary.invocationMeta).toEqual({
+    durationSeconds: 2.7710906,
+    numTurns: 1,
+    usage: {
+      inputTokens: 88891,
+      outputTokens: 69,
+      thinkingTokens: 49,
+      cacheReadTokens: 8162,
+      totalTokens: 88960,
+    },
+  });
+
+  const normalized = applyInvocationMeta(summary.result!, summary.invocationMeta, 3.1, true);
+  expect(normalized.meta).toEqual({
+    durationSeconds: 3.1,
+    numTurns: 1,
+    usage: summary.invocationMeta.usage,
+  });
+  expect(agyResultToReply(normalized).text).toBe("续接测试成功");
 });
 
 test("stream-json 跨 UTF-8 chunk 解析 init、step_update 和 terminal result", () => {

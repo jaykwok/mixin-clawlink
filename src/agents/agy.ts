@@ -3,7 +3,7 @@ import { dirname, extname, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { cfg, type Cfg } from "../config.ts";
 import { getLogger } from "../logger.ts";
-import type { Agent, AgentProgress, ReplyOpts, ReplyResult } from "./base.ts";
+import type { Agent, AgentProgress, AgentRunMeta, ReplyOpts, ReplyResult } from "./base.ts";
 import { compareAgyVersions, resolveAgyCliPath, detectAgyVersion } from "./agy-cli.ts";
 import { AGY_MIN_VERSION, AGY_REPLY_SCHEMA, AgyStreamParser, type AgyResult } from "./agy-protocol.ts";
 
@@ -62,23 +62,37 @@ export class AgyAgent implements Agent {
       const excerpt = run.rawOutput.trim().slice(0, 1000);
       throw new Error(`agy 未返回 terminal result 事件${excerpt ? `：${excerpt}` : ""}`);
     }
-    const status = result.status?.toUpperCase();
-    if (status && status !== "SUCCESS") {
-      throw new Error(`agy 返回失败状态 ${result.status}${result.response ? `：${result.response}` : ""}`);
-    }
-
     logRunMeta(result);
-    const structured = result.structured;
-    const replyText = structured
-      ? structured.text
-      : result.response || "(已完成，无文本输出。若需要请查看回传的文件。)";
-    return {
-      text: replyText,
-      files: structured?.files ?? [],
-      sessionId: result.conversationId ?? run.conversationId,
-      meta: result.meta,
-    };
+    return agyResultToReply(result, run.conversationId);
   }
+}
+
+/**
+ * agy 1.1.10 可能在 status=ERROR 时仍把通过 schema 的完整 JSON 放进 response。
+ * 可验证的结构化结果或非空正文优先保留；只有完全没有可用结果时才抛错。
+ */
+export function agyResultToReply(result: AgyResult, streamConversationId?: string): ReplyResult {
+  const structured = result.structured;
+  const response = result.response.trim();
+  const hasUsableResult = structured !== undefined || response.length > 0;
+  const status = result.status?.toUpperCase();
+  if (status && status !== "SUCCESS") {
+    const reason = result.error ? `：${result.error}` : "";
+    if (!hasUsableResult) throw new Error(`agy 返回失败状态 ${result.status}，且没有可用结果${reason}`);
+    log.warn(
+      "agy status=%s，但返回了可用%s；保留结果。error=%s",
+      result.status,
+      structured ? "结构化结果" : "正文",
+      result.error?.slice(0, 1000) ?? "(无)",
+    );
+  }
+  const text = structured ? structured.text : response;
+  return {
+    text: text || (structured?.files.length ? "" : "(已完成，无文本输出。若需要请查看回传的文件。)"),
+    files: structured?.files ?? [],
+    sessionId: result.conversationId ?? streamConversationId,
+    meta: result.meta,
+  };
 }
 
 interface AgyProcessResult {
@@ -97,6 +111,7 @@ function runAgyPrint(
   onProgress?: (event: AgentProgress) => void,
 ): Promise<AgyProcessResult> {
   return new Promise((resolvePromise, reject) => {
+    const startedAt = Date.now();
     const args = buildAgyArgs(prompt, convId, cfg, extraDirs);
     log.info("spawn: %s %s", cliPath, summarizeArgs(args));
     const child = spawn(cliPath, args, {
@@ -121,8 +136,20 @@ function runAgyPrint(
       settled = true;
       clearTimeout(timer);
       abortController?.signal.removeEventListener("abort", onAbort);
-      if (error) reject(error);
-      else resolvePromise(parser.finish());
+      if (error) {
+        reject(error);
+        return;
+      }
+      const summary = parser.finish();
+      if (summary.result) {
+        summary.result = applyInvocationMeta(
+          summary.result,
+          summary.invocationMeta,
+          (Date.now() - startedAt) / 1000,
+          convId !== null,
+        );
+      }
+      resolvePromise(summary);
     };
     const stopChild = () => {
       if (!child.pid) return;
@@ -175,6 +202,28 @@ function runAgyPrint(
       finish();
     });
   });
+}
+
+/**
+ * stream-json 的 terminal meta 在续接时可能是整段 conversation 的累计值。
+ * `/status` 需要的是本次进程指标，因此优先采用本次流中的 DONE step 汇总。
+ */
+export function applyInvocationMeta(
+  result: AgyResult,
+  invocationMeta: AgentRunMeta,
+  elapsedSeconds: number,
+  resumed: boolean,
+): AgyResult {
+  const hasResult = result.structured !== undefined || result.response.trim().length > 0;
+  return {
+    ...result,
+    meta: {
+      durationSeconds: Number.isFinite(elapsedSeconds) ? elapsedSeconds : invocationMeta.durationSeconds,
+      numTurns: invocationMeta.numTurns ?? (hasResult ? 1 : undefined),
+      // 新会话缺少 step usage 时 terminal usage 仍可信；续接时宁可不显示，也不显示历史累计值。
+      usage: invocationMeta.usage ?? (resumed ? undefined : result.meta.usage),
+    },
+  };
 }
 
 type AgyArgConfig = Pick<

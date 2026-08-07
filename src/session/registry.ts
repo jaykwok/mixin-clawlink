@@ -1,9 +1,9 @@
 /**
- * 多会话注册表：编号 ↔ {claude sessionId, title, created, turns} 映射。
+ * 多会话注册表：编号 ↔ {agent sessionId, title, created, turns} 映射。
  *
  * 不再存对话回合内容（JSONL）——记忆交给 SDK 原生 resume：
- * 每个槽位存一个 claude session_id，/use 切换后 agents/claude.ts 把它作为
- * options.resume 传进去即可恢复全量上下文。布局：data/conversations/<userId>/index.json
+ * 每个槽位存一个 agent 原生 session ID，/use 切换后由当前 agent 用于续接。
+ * 布局：data/conversations/<userId>/index.json
  */
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
@@ -15,7 +15,7 @@ const PLACEHOLDER = "(新会话)";
 
 interface Slot {
   id: string;            // 槽位 id（稳定标识）
-  sessionId: string | null; // claude 的 session_id（首轮 query 后回写；resume 用）
+  sessionId: string | null; // agent 原生 session ID（首轮 query 后回写；续接用）
   title: string;
   created: number;       // ms epoch
   turns: number;
@@ -80,7 +80,7 @@ class Registry {
     return idx.sessions.find(s => s.id === idx.active);
   }
 
-  /** 当前槽位的 claude session_id（供 claude.ts 做 resume）。 */
+  /** 当前槽位的原生 agent session ID。 */
   async getActiveSessionId(uid: string): Promise<string | null> {
     const idx = await this.ensure(uid);
     return this.activeSlot(uid, idx)?.sessionId ?? null;
@@ -97,12 +97,12 @@ class Registry {
     }
   }
 
-  /** agent 回复完成：回写 claude session_id，轮数 +1。 */
-  async finishTurn(uid: string, claudeSessionId: string): Promise<void> {
+  /** agent 回复完成：回写原生 session ID，轮数 +1。 */
+  async finishTurn(uid: string, agentSessionId: string): Promise<void> {
     const idx = await this.ensure(uid);
     const s = this.activeSlot(uid, idx);
     if (s) {
-      s.sessionId = claudeSessionId;
+      s.sessionId = agentSessionId;
       s.turns += 1;
       await this.write(uid, idx);
     }
@@ -123,7 +123,7 @@ class Registry {
     return idx.sessions.map((s, i) => ({ num: i + 1, title: s.title, turns: s.turns, active: s.id === idx.active }));
   }
 
-  /** 按编号获取会话的 claude sessionId（供 TUI 拉取对话历史）。 */
+  /** 按编号获取会话的原生 agent session ID（供 TUI 拉取对话历史）。 */
   async getSessionIdByNum(uid: string, num: number): Promise<string | null> {
     const idx = await this.read(uid);
     if (num >= 1 && num <= idx.sessions.length) {
@@ -153,7 +153,7 @@ class Registry {
     return false;
   }
 
-  /** 清空当前槽位（换一个新 claude session = 重开）。 */
+  /** 清空当前槽位（下次请求不传 session ID，令当前 agent 新建会话）。 */
   async resetSession(uid: string): Promise<void> {
     const idx = await this.ensure(uid);
     const s = this.activeSlot(uid, idx);

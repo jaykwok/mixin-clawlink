@@ -27,7 +27,7 @@ export interface AgentRunMeta {
 }
 
 export interface ReplyOpts {
-  /** 当前槽位的 claude session_id（有则 resume 续上下文；无则新会话）。 */
+  /** 当前槽位的原生 agent session ID（有则续接上下文；无则新会话）。 */
   sessionId?: string | null;
   /** 危险操作征求用户同意的回调。提供则启用 canUseTool 闸门。 */
   askPermission?: AskPermission;
