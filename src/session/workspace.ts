@@ -1,6 +1,6 @@
 /**
  * 工作目录：默认固定根目录（MIXIN_WORKSPACE），可用 /cwd 按用户切换到任意项目目录。
- * 文件回传改由 agent 用 [[FILE: 路径]] 标记显式声明，不整目录 diff（大目录不卡）。
+ * 文件回传由 agent 显式声明（agy 用 JSON Schema；Claude 兼容 [[FILE: 路径]]），不整目录 diff。
  */
 import { mkdir } from "node:fs/promises";
 import { existsSync, mkdirSync } from "node:fs";

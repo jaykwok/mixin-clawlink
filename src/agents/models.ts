@@ -112,7 +112,7 @@ export async function fetchModels(): Promise<ModelInfo[]> {
 
 /**
  * 从 agy CLI 获取模型列表（spawn `agy models`，解析纯文本输出）。
- * 兼容旧版“每行一个显示名”和 1.1.5+“稳定 slug + 显示名”输出。
+ * 解析 1.1.10+“稳定 slug + 显示名”输出，并宽松容忍额外提示行。
  */
 export function fetchAgyModels(): ModelInfo[] {
   const cliPath = resolveAgyCliPath(cfg.AGY_CLI_PATH);
@@ -139,7 +139,7 @@ export function fetchAgyModels(): ModelInfo[] {
 }
 
 /**
- * 解析 agy models 文本。1.1.5 的稳定 slug 是持久配置值；显示名只用于 UI。
+ * 解析 agy models 文本。稳定 slug 是持久配置值；显示名只用于 UI。
  * 同时保留旧版逐行显示名作为 id，便于尚未升级的输出被友好识别。
  */
 export function parseAgyModelsOutput(output: string): ModelInfo[] {

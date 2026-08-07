@@ -9,7 +9,7 @@ import { basename, isAbsolute, resolve } from "node:path";
 import { checkCredentials, cfg, EDITABLE, getValue, lookup, setValue, INBOX_DIR } from "./config.ts";
 import { expandHome } from "./config.ts";
 import { makeAgent } from "./agents/index.ts";
-import type { Agent } from "./agents/base.ts";
+import type { Agent, AgentProgress, AgentRunMeta } from "./agents/base.ts";
 import { fetchAgentModels, type ModelInfo } from "./agents/models.ts";
 import { initAgentInstructions, needsAgentInstructions } from "./agents/instructions.ts";
 import { TokenManager } from "./im/auth.ts";
@@ -35,6 +35,7 @@ const COMMANDS: Record<string, string> = {
   "/config": "查看/修改配置：/config 或 /config <编号|名称> <值>",
   "/model": "查看/选择模型：/model 或 /model <编号|名称>，/model default 用默认",
   "/effort": "查看/调整 agy 推理强度：/effort [low|medium|high|default]",
+  "/agy": "向 agy 透传 slash command/skill：/agy /skill [参数]",
   "/init": "初始化当前工作区的 Agent 规则文件（可重复安全执行）",
   "/reboot": "软重启（重读 .env、重建 agent/WS）",
   "/stop": "停止当前正在执行的任务",
@@ -59,6 +60,8 @@ export class Bot {
   private readonly workspace = new Workspace();
   private readonly locks = new Map<string, Promise<void>>();
   private readonly running = new Map<string, AbortController>(); // uid -> 当前任务的 AbortController
+  private readonly runningProgress = new Map<string, string>(); // uid -> agy stream-json 最新进度
+  private readonly lastRunMeta = new Map<string, AgentRunMeta>();
   private readonly pending = new Map<string, (allow: boolean) => void>(); // uid -> 审批 resolver
   private readonly initReminded = new Set<string>(); // 每次进程生命周期每用户只提醒一次
   private serveResolve: (() => void) | null = null;
@@ -254,13 +257,27 @@ export class Bot {
       const active = sessions.find(s => s.active)?.num;
       const turns = await registry.countTurns(uid);
       const agyState = isAgyAgent()
-        ? `\n模型: ${cfg.AGY_MODEL || "默认"}\n推理强度: ${cfg.AGY_EFFORT || "默认"}`
+        ? `\n模型: ${cfg.AGY_MODEL || "默认"}\n推理强度: ${cfg.AGY_EFFORT || "默认"}\nsandbox: ${cfg.AGY_SANDBOX ? "开" : "关"}\n超时: ${cfg.AGY_TIMEOUT_S}s`
         : "";
-      await send(`agent: ${this.agent.name}${agyState}\n工作目录: ${wd}\n当前会话: ${active ? `第${active}个` : "无"}/${sessions.length}（${turns} 轮）`);
+      const progress = this.runningProgress.get(uid);
+      const meta = formatRunMeta(this.lastRunMeta.get(uid));
+      await send(`agent: ${this.agent.name}${agyState}\n工作目录: ${wd}\n当前会话: ${active ? `第${active}个` : "无"}/${sessions.length}（${turns} 轮）${progress ? `\n运行中: ${progress}` : ""}${meta ? `\n上轮: ${meta}` : ""}`);
     } else if (cmd === "/model") {
       await this.handleModel(uid, text);
     } else if (cmd === "/effort") {
       await this.handleEffort(uid, text);
+    } else if (cmd === "/agy") {
+      if (!isAgyAgent()) {
+        await send("⚠️ /agy 仅在 AGENT=antigravity 时可用。");
+        return;
+      }
+      const forwardedText = text.replace(/^\/agy(?:\s+|$)/i, "").trim();
+      if (!forwardedText) {
+        await send("用法: /agy /<agy 命令或 skill> [参数]\n示例: /agy /my-skill review this diff");
+        return;
+      }
+      // 显式命名空间避免与 ClawLink 自身的 /model、/use 等命令冲突。
+      void this.dispatch({ ...msg, text: forwardedText });
     } else if (cmd === "/help") {
       const lines = ["命令列表:"];
       for (const [c, d] of Object.entries(COMMANDS)) lines.push(`${c} — ${d}`);
@@ -343,7 +360,7 @@ export class Bot {
     }
   }
 
-  /** agy 1.1.5+ /effort：热改下次 headless 启动所用的 reasoning effort。 */
+  /** agy 1.1.10+ /effort：热改下次 headless 启动所用的 reasoning effort。 */
   private async handleEffort(uid: string, text: string): Promise<void> {
     const send = (s: string) => this.pipe.sendText(uid, s);
     if (!isAgyAgent()) {
@@ -435,6 +452,7 @@ export class Bot {
         }
       } finally {
         this.running.delete(msg.senderId);
+        this.runningProgress.delete(msg.senderId);
       }
     });
   }
@@ -472,15 +490,19 @@ export class Bot {
     const sessionId = await registry.getActiveSessionId(uid);
 
     // 3) agent 执行（带 resume + 危险审批 + 中断）
+    if (isAgyAgent()) this.runningProgress.set(uid, "正在启动 agy");
     const result = await this.agent.reply(uid, userText, wd, attachments, {
       sessionId,
       askPermission: (u, t, s) => this.askPermission(u, t, s),
       abortController: ac,
+      onProgress: event => this.recordProgress(uid, event),
     });
     if (result.sessionId) await registry.finishTurn(uid, result.sessionId);
+    if (result.meta) this.lastRunMeta.set(uid, result.meta);
 
-    // 4) 解析 [[FILE: ...]] → 回传文件；正文去掉标记后发送
-    const [cleanText, filePaths] = extractFiles(result.text);
+    // 4) agy 优先使用 JSON Schema 的 files；Claude 继续兼容 [[FILE: ...]]。
+    const [cleanText, legacyFilePaths] = extractFiles(result.text);
+    const filePaths = [...new Set([...(result.files ?? []), ...legacyFilePaths])];
     if (cleanText) await this.pipe.sendText(uid, cleanText);
     for (const fp of filePaths) await this.sendPath(uid, wd, fp);
   }
@@ -509,6 +531,17 @@ export class Bot {
     if (!ok) await this.pipe.sendTip(uid, `⚠️ 发送失败: ${basename(p)}`);
   }
 
+  private recordProgress(uid: string, event: AgentProgress): void {
+    // 不把模型 narration 当思维链展示；只显示阶段或工具名称。
+    if (event.kind === "agent") {
+      this.runningProgress.set(uid, "正在生成回复");
+      return;
+    }
+    const label = event.kind === "subagent" ? "子任务" : "工具";
+    const state = event.state === "done" ? "完成" : "执行中";
+    this.runningProgress.set(uid, `${label}${state}: ${event.text.slice(0, 160)}`);
+  }
+
   private async fmtSessions(uid: string): Promise<string> {
     const sessions = await registry.listSessions(uid);
     if (!sessions.length) return "（暂无会话）";
@@ -525,6 +558,16 @@ function extractFiles(text: string): [string, string[]] {
   FILE_RE.lastIndex = 0;
   while ((m = FILE_RE.exec(text)) !== null) paths.push(m[1].trim());
   return [text.replace(FILE_RE, "").trim(), paths];
+}
+
+function formatRunMeta(meta: AgentRunMeta | undefined): string {
+  if (!meta) return "";
+  const parts: string[] = [];
+  if (meta.durationSeconds !== undefined) parts.push(`${meta.durationSeconds.toFixed(1)}s`);
+  if (meta.numTurns !== undefined) parts.push(`${meta.numTurns} turns`);
+  if (meta.usage?.totalTokens !== undefined) parts.push(`${meta.usage.totalTokens} tokens`);
+  if (meta.usage?.cacheReadTokens) parts.push(`cache ${meta.usage.cacheReadTokens}`);
+  return parts.join(" · ");
 }
 
 function parseInt1(text: string): number | null {

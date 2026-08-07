@@ -55,13 +55,17 @@ test("/init 为 agy 优先复用已有 GEMINI.md，否则创建 AGENTS.md", asyn
   }
 });
 
-test("agy 的 AGENTS.md/GEMINI.md 任一已初始化时不会跨文件重复添加", async () => {
+test("agy 会原地升级旧受管区块且不会跨文件重复添加", async () => {
   const workspace = tempWorkspace();
   try {
     writeFileSync(join(workspace, "AGENTS.md"), "# Agent rules\n", "utf8");
     writeFileSync(join(workspace, "GEMINI.md"), `${CLAWLINK_INSTRUCTIONS_BEGIN}\n已有受管内容\n`, "utf8");
     const result = await initAgentInstructions("antigravity", workspace);
-    expect(result).toEqual({ path: join(workspace, "GEMINI.md"), changed: false });
+    expect(result).toEqual({ path: join(workspace, "GEMINI.md"), changed: true });
+    expect((await initAgentInstructions("antigravity", workspace))?.changed).toBeFalse();
+    const gemini = readFileSync(join(workspace, "GEMINI.md"), "utf8");
+    expect(gemini.split(CLAWLINK_INSTRUCTIONS_BEGIN)).toHaveLength(2);
+    expect(gemini).toContain("JSON Schema");
     expect(readFileSync(join(workspace, "AGENTS.md"), "utf8")).toBe("# Agent rules\n");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
