@@ -2,7 +2,7 @@
  * 极简日志：控制台 + 按大小轮转的文件（无第三方依赖，保持分发精简）。
  * 同步写入（个人 bot 日志量小，sync 简单且不会交错）。
  */
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { format } from "node:util";
 
@@ -44,10 +44,16 @@ export function subscribeConsole(fn: (line: string) => void): () => void {
 
 function rotate() {
   // clawlink.log → .1 → .2 → … 丢弃 .<backup>
+  if (LOG_BACKUP <= 0) {
+    try { if (existsSync(LOG_PATH)) unlinkSync(LOG_PATH); } catch { /* 忽略单次轮转错误 */ }
+    written = 0;
+    return;
+  }
   for (let i = LOG_BACKUP; i >= 1; i--) {
     const from = i === 1 ? LOG_PATH : `${LOG_PATH}.${i - 1}`;
     const to = `${LOG_PATH}.${i}`;
     try {
+      if (existsSync(to)) unlinkSync(to); // Windows rename 不会覆盖已有目标
       if (existsSync(from)) renameSync(from, to);
     } catch {
       /* 忽略单次轮转错误 */

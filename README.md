@@ -18,7 +18,7 @@ Mixin ClawLink 是量子密信智能助理的**非官方 OpenClaw 连接器兼�
 
 本项目不隶属于量子密信或 OpenClaw，相关产品名称仅用于说明兼容对象。上游接口可能随时调整，请仅在已获授权的账号、系统和网络环境中研究或使用，并自行遵守适用的服务条款、法律法规与数据安全要求。
 
-> 完整的协议还原记录见 [`PROTOCOL.md`](./PROTOCOL.md)（本地文件，不纳入版本库）。
+> 完整协议还原记录属于本地研究资料，不随仓库分发；项目运行和构建不依赖它。
 
 ---
 
@@ -30,7 +30,7 @@ Mixin ClawLink 是量子密信智能助理的**非官方 OpenClaw 连接器兼�
 - 量子密信智能助理的 `appId` / `appSecret`（客户端 → 通讯录 → 智能助理 → 详情页 apikey）
 - **Agent 由你自备**（二选一）：
   - **Claude Code**：本程序不写入 `ANTHROPIC_*`；会优先读进程环境，并自动从 `~/.claude/settings.json` 的 `env` 读取 base-url / key / token（`AGENT=claude` 时）。会优先使用 `CLAUDE_CLI_PATH`，未配置时自动寻找本机 `claude.exe` / `cli.js`。
-  - **Antigravity CLI（agy）**：需本机已安装 agy ≥ 1.1.10，并在运行 Bot 的同一系统账号下完成一次交互登录（或配置企业认证）。连接器使用 `stream-json`、`--json-schema`、精确 `conversation_id`、slash command/skill 展开及可靠的 `--model` / `--effort`；未配置 `AGY_CLI_PATH` 时自动从 PATH 查找 `agy` 或 `antigravity`。
+  - **Antigravity CLI（agy）**：需本机已安装 agy ≥ 1.1.10（见[官方 Releases](https://github.com/google-antigravity/antigravity-cli/releases)），并在运行 Bot 的同一系统账号下完成一次交互登录（或配置企业认证）。连接器使用 `stream-json`、`--json-schema`、精确 `conversation_id`、slash command/skill 展开及可靠的 `--model` / `--effort`；未配置 `AGY_CLI_PATH` 时自动从 PATH 查找 `agy` 或 `antigravity`。
 
 ### 2. 源码安装与运行
 
@@ -38,12 +38,12 @@ Mixin ClawLink 是量子密信智能助理的**非官方 OpenClaw 连接器兼�
 git clone https://github.com/jaykwok/mixin-clawlink.git
 cd mixin-clawlink
 bun install        # 安装 @anthropic-ai/claude-agent-sdk + ws + dotenv + OpenTUI(+solid-js)
-bun start          # 无 .env 时自动进入设置向导
+bun start          # 凭据缺失时自动进入设置向导
 ```
 
 常用脚本：
 
-- `bun start` —— 启动程序（无 `.env` 时自动进入设置向导）
+- `bun start` —— 启动程序（凭据缺失时自动进入设置向导）
 - `bun run typecheck` —— `tsc --noEmit` 类型检查（不产出文件）
 - `bun test` —— 运行测试
 
@@ -51,7 +51,7 @@ bun start          # 无 .env 时自动进入设置向导
 
 ### 3. 首次运行（设置向导）
 
-首次启动时（无 `.env` 或缺凭据），程序自动进入 **TUI 设置向导**，引导你完成全部配置。无需手动创建 `.env` 文件——向导是唯一配置入口。
+首次启动时（无 `.env` 或缺凭据），程序自动进入 **TUI 设置向导**，引导你完成配置。也可以复制 `.env.example` 为 `.env` 后手工填写；运行后还可通过面板或 `/config` 修改非凭据项。
 
 #### 向导操作流程
 
@@ -82,7 +82,7 @@ bun start          # 无 .env 时自动进入设置向导
 
 > 用户发送的附件**不会**落进工作目录，而是统一存到程序根目录下的 `inbox/`（独立于工作目录，避免污染 Agent 的项目目录）。agy 调用会自动把附件目录通过 `--add-dir` 加入本轮 workspace roots。
 
-> 如果按 `Ctrl+S` 时工作目录为空，会弹出提示：按 `Enter` 使用默认值 `./workspace`，或按 `Esc` 返回手动填写。
+`WORKSPACE` 不能为空；未显式配置时使用程序目录下的 `./workspace`。
 
 #### 再次运行
 
@@ -113,7 +113,7 @@ bun start          # 无 .env 时自动进入设置向导
 | `/agy /<命令或 skill> [参数]` | 向 agy 透传原生 slash command/skill，例如 `/agy /review 检查这个 diff` |
 | `/init` | 初始化工作区 Agent 规则；Claude 写 `CLAUDE.md`，agy 复用 `AGENTS.md` / `GEMINI.md` |
 | `/reboot` | 软重启（重读 `.env`、重建 agent/WS） |
-| `/stop` | 停止当前正在执行的任务 |
+| `/stop` | 停止当前任务，并丢弃此前已排队但尚未开始的消息 |
 | `/cwd` | 查看 / 切换工作目录 |
 | `/send` | 手动发送一个文件：`/send <路径>` |
 | `/status` | 查看 agent / 工作目录 / 当前会话 |
@@ -121,11 +121,13 @@ bun start          # 无 .env 时自动进入设置向导
 
 ### 2. 会话管理（多会话）
 
-- 每个会话槽位存一个 session_id（`data/conversations/<userId>/index.json`）。
+- 每个会话槽位保存原生 session ID、所属 agent、工作目录和 reset 代次（`data/conversations/<userId>/index.json`）。旧格式会在首次续接时自动补齐归属信息。
 - **Claude**：SDK 原生 `resume`，首轮 `query()` 后从结果抓 `session_id` 存盘，`/use` 切换后作为 `options.resume` 传回，恢复全量上下文。
 - **Antigravity**：从 `stream-json` 的 terminal `result` 直接取得 `conversation_id` 并存盘，后续用 `--conversation <uuid>` 精确续接；不再扫描或猜测 agy 的用户缓存文件。
 - `/new` 新开槽、`/list` 列编号、`/use N` 切、`/reset` 当前槽换新 session、`/del N` 删。
-- 限制：Claude session 按 `cwd` 存盘，`/cwd` 切换后旧槽可能无法 resume。
+- session ID 只会在相同 agent 与工作目录下续接；切换 agent 或 `/cwd` 后，下一条消息会自动开启新的原生 session，避免跨 agent/cwd 恢复到不兼容的历史工具步骤。
+- 每轮请求绑定发起时的槽位和 reset 代次；即使 `/new`、`/reset`、`/use` 与旧任务结束发生竞态，旧 session 也不会回写到新会话。
+- `/stop`、`/new`、`/reset`、`/use`、`/del`、`/cwd` 会使此前排队的旧消息失效，避免它们随后误跑进新会话。
 
 ### 3. 模型与推理强度
 
@@ -135,6 +137,7 @@ bun start          # 无 .env 时自动进入设置向导
 
 - **Claude**：从 Claude Code 网关拉取（同时支持 Anthropic `/v1/models` 与 OpenAI `/models`；DeepSeek 的 `/anthropic` base 会自动转到根路径 `/models`）。
 - **agy**：执行 `agy models`，过滤进度提示并解析「稳定 slug + 显示名」，只把 slug 保存到 `AGY_MODEL`。
+- **echo**：没有模型配置，`/model` 会明确提示不支持，不会回退访问 Claude 网关。
 
 用法：
 
@@ -211,14 +214,15 @@ agy 1.1.10+ 支持热切换推理强度，对应环境项 `MIXIN_AGY_EFFORT`，�
 #### agy 结构化 headless 协议
 
 - 固定使用 `--output-format stream-json`，增量解析 `init`、`step_update`、`result`，正确处理 UTF-8 跨 chunk 边界。
-- terminal `result` 提供最终 `response`、`conversation_id`、耗时、turn 数和 token usage；`/status` 展示上轮摘要。
+- terminal `result` 提供最终 `response`、`conversation_id`，续接时还可能带有累计元数据；连接器改用本次 `DONE step_update` 汇总 token，并用当前子进程墙钟耗时生成 `/status` 的上轮摘要，避免展示整段历史累计值。
 - 固定使用 `--json-schema` 约束 `{ text, files }`；若上游未返回 `structured_output`，正文回退到 `response`，但不会再通过 agy 用户目录猜结果。
+- 解析 terminal `error`；若 agy 因旧会话历史步骤返回 `ERROR`，但本轮同时给出有效 `structured_output`/正文且进程已产出结果，连接器保留回复并记录真实错误。完全没有可用结果时仍按失败处理。
 - `/agy` 保证被转发的 slash command/skill 位于 prompt 第一个 token，满足 agy 1.1.9+ 的 leading-command 展开要求。
 - `/stop` 在 Windows 使用 `taskkill /T`、在 Unix 使用独立进程组，确保 agy 的工具进程、后台任务和子 Agent 一并结束。
 
 #### Claude 权限模式（`CLAUDE_PERMISSION`）
 
-默认使用 `auto`：Agent 自行判断，必要时申请权限；`CLAUDE_DANGER_CONFIRM=1` 时，命中危险模式的 Bash 仍会强制在量子密信中确认（见下节）。
+默认使用 `auto`：Agent 自行判断，必要时申请权限；`CLAUDE_DANGER_CONFIRM=1` 时，命中危险模式的 Bash 仍会强制在量子密信中确认（见下节）。审批回调自身异常时按拒绝处理，不会静默放行。
 
 ### 2. 危险操作审批
 
@@ -263,6 +267,7 @@ src/
 │   └── messages.ts     # 收消息（HMAC / 去重）+ 发消息（文本 / 分片上传 / 下载）
 ├── agents/
 │   ├── base.ts         # Agent 接口（reply 带 resume / askPermission / abortController）
+│   ├── kind.ts         # Agent 名称归一化（agy 别名）与类型判断
 │   ├── echo.ts         # 回声（测通道）
 │   ├── claude.ts       # Claude Agent SDK：query + resume + canUseTool 危险审批 + 多模态
 │   ├── claude-settings.ts # 动态读取进程 env / ~/.claude/settings.json
@@ -274,7 +279,7 @@ src/
 │   └── index.ts        # 工厂（claude / antigravity 惰性 import）
 ├── session/
 │   ├── workspace.ts    # 每用户工作目录（默认固定根 + /cwd 切换）
-│   └── registry.ts     # 会话注册表：编号 ↔ sessionId 映射 + listUsers
+│   └── registry.ts     # 会话注册表：槽位 ↔ agent/cwd/sessionId/代次 + listUsers
 └── tui/
     ├── index.tsx       # OpenTUI 运维面板 + 首启向导（@opentui/solid，SolidJS 信号驱动）
     └── navigation.ts   # 视图切换 / 分页 / 编号选择工具函数
@@ -302,5 +307,5 @@ src/
 
 - **量子加密**未实现（需专有 `libqss.wasm`）。当前只收发明文——这是未订购量子加密用户的默认能力。
 - WS 握手要带自定义头（裸 token + `X-App-ID`），标准 `WebSocket` 客户端不支持自定义头，故用 `ws` 包；心跳 ping/pong 手动实现。
-- 走 router 时第三方模型若不支持视觉，图片识别无效（图片仍会作为 image block 注入，失败回退到 Read）。
+- 走 router 时第三方模型若不支持视觉，图片识别可能无效；明确返回图片/媒体格式不兼容时会回退为磁盘路径，让 Agent 尝试用文件工具读取。
 - **Antigravity CLI** 无 SDK，走 `--print` headless 子进程模式；无法在面板浏览完整对话历史；危险审批回调对 agy 无效。请使用 `AGY_PERMISSION=settings`、agy 权限规则及可选 `AGY_SANDBOX` 控制风险，或在可信环境中使用默认 `bypass`。

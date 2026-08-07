@@ -9,6 +9,7 @@ import { AGY_MIN_VERSION, AGY_REPLY_SCHEMA, AgyStreamParser, type AgyResult } fr
 
 const log = getLogger("agent:agy");
 const IMG_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
+const STDERR_TAIL_BYTES = 1024 * 1024;
 
 export class AgyAgent implements Agent {
   readonly name = "antigravity";
@@ -30,8 +31,6 @@ export class AgyAgent implements Agent {
     this.agyCliPath = path;
     log.info("使用本机 agy CLI: %s (v%s, stream-json)", path, version);
   }
-
-  async shutdown(): Promise<void> {}
 
   async reply(_uid: string, text: string, workspace: string, attachments: string[], opts: ReplyOpts = {}): Promise<ReplyResult> {
     const prompt = buildAgyPrompt(text, attachments, workspace);
@@ -74,7 +73,7 @@ export class AgyAgent implements Agent {
 export function agyResultToReply(result: AgyResult, streamConversationId?: string): ReplyResult {
   const structured = result.structured;
   const response = result.response.trim();
-  const hasUsableResult = structured !== undefined || response.length > 0;
+  const hasUsableResult = hasUsableAgyResult(result);
   const status = result.status?.toUpperCase();
   if (status && status !== "SUCCESS") {
     const reason = result.error ? `：${result.error}` : "";
@@ -128,18 +127,10 @@ function runAgyPrint(
       if (event.kind !== "agent") log.debug("agy progress: %s %s %s", event.kind, event.state, event.text.slice(0, 500));
       onProgress?.(event);
     });
-    const stderrChunks: Buffer[] = [];
+    let stderrTail = Buffer.alloc(0);
     let settled = false;
 
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      abortController?.signal.removeEventListener("abort", onAbort);
-      if (error) {
-        reject(error);
-        return;
-      }
+    const collectSummary = (): AgyProcessResult => {
       const summary = parser.finish();
       if (summary.result) {
         summary.result = applyInvocationMeta(
@@ -149,7 +140,18 @@ function runAgyPrint(
           convId !== null,
         );
       }
-      resolvePromise(summary);
+      return summary;
+    };
+    const finish = (error?: Error, summary?: AgyProcessResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      abortController?.signal.removeEventListener("abort", onAbort);
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolvePromise(summary ?? collectSummary());
     };
     const stopChild = () => {
       if (!child.pid) return;
@@ -183,25 +185,42 @@ function runAgyPrint(
     }, (cfg.AGY_TIMEOUT_S + 15) * 1000);
 
     child.stdout.on("data", (chunk: Buffer) => parser.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrTail = Buffer.concat([stderrTail, chunk]);
+      if (stderrTail.length > STDERR_TAIL_BYTES) stderrTail = stderrTail.subarray(stderrTail.length - STDERR_TAIL_BYTES);
+    });
     child.on("error", error => finish(new Error(`spawn agy 失败: ${error.message}`)));
     child.on("close", (code, signal) => {
+      if (settled) return;
       if (abortController?.signal.aborted) {
         const error = new Error("用户中断（/stop）");
         error.name = "AbortError";
         finish(error);
         return;
       }
-      const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
+      const summary = collectSummary();
+      const stderr = stderrTail.toString("utf8").trim();
       if (code !== 0) {
-        const detail = stderr || `退出码 ${code}${signal ? ` (signal ${signal})` : ""}`;
+        if (summary.result && hasUsableAgyResult(summary.result)) {
+          log.warn("agy 退出码=%s，但 terminal result 含可用结果；继续交给结果状态处理", code);
+          finish(undefined, summary);
+          return;
+        }
+        const detail = summary.result?.error
+          || stderr
+          || summary.rawOutput.trim().slice(-1000)
+          || `退出码 ${code}${signal ? ` (signal ${signal})` : ""}`;
         finish(new Error(`agy 执行失败: ${detail}`));
         return;
       }
       if (stderr) log.debug("agy stderr: %s", stderr.slice(0, 1000));
-      finish();
+      finish(undefined, summary);
     });
   });
+}
+
+function hasUsableAgyResult(result: AgyResult): boolean {
+  return result.structured !== undefined || result.response.trim().length > 0;
 }
 
 /**

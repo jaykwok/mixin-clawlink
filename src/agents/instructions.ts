@@ -1,12 +1,13 @@
 /** 工作区 Agent 规则初始化：为当前 Agent 追加 Mixin ClawLink 的持久能力说明。 */
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { isAgyAgentName, normalizeAgentKind } from "./kind.ts";
 
 export const CLAWLINK_INSTRUCTIONS_BEGIN = "<!-- mixin-clawlink:instructions:begin -->";
 export const CLAWLINK_INSTRUCTIONS_END = "<!-- mixin-clawlink:instructions:end -->";
 
 function instructionsForAgent(agent: string): string {
-  const isAgy = ["antigravity", "agy"].includes(agent.trim().toLowerCase());
+  const isAgy = isAgyAgentName(agent);
   const fileProtocol = isAgy
     ? `- 当当前调用来自 Mixin ClawLink 并提供 \`{ text, files }\` JSON Schema 时：正文写入 \`text\`，待发送文件的绝对路径写入 \`files\`。
 - 在这种结构化调用中不要输出 \`[[FILE: ...]]\`；没有文件时返回空数组，只列出用户明确需要且确实存在的文件。`
@@ -35,9 +36,9 @@ export interface InstructionInitResult {
 
 /** 当前 Agent 应使用的规则文件；agy 同时支持二者，优先复用已有 AGENTS.md/GEMINI.md。 */
 export async function instructionPathForAgent(agent: string, workspace: string): Promise<string | null> {
-  const key = agent.trim().toLowerCase();
+  const key = normalizeAgentKind(agent);
   if (key === "claude") return resolve(workspace, "CLAUDE.md");
-  if (key === "antigravity" || key === "agy") {
+  if (key === "antigravity") {
     const agents = resolve(workspace, "AGENTS.md");
     const gemini = resolve(workspace, "GEMINI.md");
     // 两个文件 agy 都会加载：任一文件已有受管区块就直接复用，避免跨文件重复添加。

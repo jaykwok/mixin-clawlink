@@ -17,7 +17,12 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  setupLogging();
+  setupLogging({
+    dir: cfg.LOG_DIR,
+    file: cfg.LOG_FILE,
+    maxBytes: cfg.LOG_MAX_BYTES,
+    backupCount: cfg.LOG_BACKUP_COUNT,
+  });
   console.log(`\n  Mixin ClawLink — 量子密信智能助理连接器 — agent=${cfg.AGENT}  env=${cfg.ENV}  (Bun + OpenTUI)\n`);
 
   let sigint = false;
@@ -41,26 +46,28 @@ async function main(): Promise<void> {
   let notify: string | null = null;
   // 循环条件挂在 sigint 上：Ctrl+C 落在哪一步都行（含 5s 退避、/reboot 的 reload），下次回到顶部即退出。
   while (!sigint) {
-    const bot = await Bot.create(notify ? { notifyStart: notify } : undefined);
-    notify = null;
-    activeBot = bot;
-    tui.attachBot(bot);
+    let bot: Bot | null = null;
     let crashed = false;
     try {
+      bot = await Bot.create(notify ? { notifyStart: notify } : undefined);
+      notify = null;
+      activeBot = bot;
+      tui.attachBot(bot);
       await bot.serve(); // start + 常驻，直到 stop / reboot / 异常
     } catch (e) {
       crashed = true;
       log.error("Bot 运行异常: %s", e instanceof Error ? e.stack : String(e));
     } finally {
       tui.detachBot();
-      await bot.stop().catch(() => {}); // 统一收尾，防 ws/agent 关闭抛错冒泡
+      activeBot = null;
+      await bot?.stop().catch(() => {}); // 统一收尾，防 ws/agent 关闭抛错冒泡
     }
     if (crashed && !sigint) {
       log.warn("5 秒后重建…");
       await sleep(5000);
       continue;
     }
-    if (!bot.rebootRequested || sigint) break;
+    if (!bot?.rebootRequested || sigint) break;
     notify = bot.rebootByUid; // 让新 bot 启动后给触发者发"重启完成"
     reload();
     log.info("软重启：已重载 .env，重建 Bot…");

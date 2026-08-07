@@ -1,5 +1,5 @@
 import { expect, test, beforeAll, afterAll } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { registry } from "../src/session/registry.ts";
@@ -66,4 +66,55 @@ test("deleteSessions 删非活动会话不影响 active", async () => {
   const list = await registry.listSessions(uid);
   expect(list.length).toBe(1);
   expect(list[0].active).toBe(true); // 会话2仍是active
+});
+
+test("本轮绑定槽位代次，reset 后旧任务不能把 session 写回来", async () => {
+  const uid = "u-generation";
+  const workspace = join(tmpDir, "workspace-a");
+  const turn = await registry.beginTurn(uid, "antigravity", workspace, "第一轮");
+  await registry.resetSession(uid, "antigravity", workspace);
+  expect(await registry.finishTurn(uid, turn, "stale-conversation-id")).toBeFalse();
+
+  const next = await registry.beginTurn(uid, "antigravity", workspace, "新一轮");
+  expect(next.sessionId).toBeNull();
+  expect(await registry.finishTurn(uid, next, "fresh-conversation-id")).toBeTrue();
+  expect((await registry.listSessions(uid))[0]).toMatchObject({ agent: "antigravity", turns: 1 });
+});
+
+test("切换 agent 或工作目录时不复用不兼容的原生 session", async () => {
+  const uid = "u-scope";
+  const workspaceA = join(tmpDir, "workspace-a");
+  const workspaceB = join(tmpDir, "workspace-b");
+  const agyTurn = await registry.beginTurn(uid, "agy", workspaceA, "agy 请求");
+  await registry.finishTurn(uid, agyTurn, "agy-conversation-id");
+
+  const claudeTurn = await registry.beginTurn(uid, "claude", workspaceA, "Claude 请求");
+  expect(claudeTurn.sessionId).toBeNull();
+  await registry.finishTurn(uid, claudeTurn, "claude-session-id");
+
+  const moved = await registry.beginTurn(uid, "claude", workspaceB, "新目录请求");
+  expect(moved.sessionId).toBeNull();
+  expect(moved.generation).toBeGreaterThan(claudeTurn.generation);
+});
+
+test("损坏的会话索引显式报错，不静默覆盖为新索引", async () => {
+  const uid = "u-corrupt";
+  const dir = join(tmpDir, "data", "conversations", uid);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "index.json"), "{not-json", "utf8");
+  await expect(registry.listSessions(uid)).rejects.toThrow("读取会话索引失败");
+});
+
+test("结构正确但槽位字段损坏的索引也显式报错", async () => {
+  const uid = "u-invalid-slot";
+  const dir = join(tmpDir, "data", "conversations", uid);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "index.json"), JSON.stringify({ active: null, sessions: [null] }), "utf8");
+  await expect(registry.listSessions(uid)).rejects.toThrow("sessions[0] 必须是对象");
+});
+
+test("同一用户并发新建会话不会因索引读改写竞态丢失", async () => {
+  const uid = "u-concurrent";
+  await Promise.all(Array.from({ length: 20 }, () => registry.newSession(uid, "antigravity", tmpDir)));
+  expect(await registry.listSessions(uid)).toHaveLength(20);
 });

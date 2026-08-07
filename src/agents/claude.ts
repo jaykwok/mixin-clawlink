@@ -38,8 +38,6 @@ export class ClaudeAgent implements Agent {
     this.claudeCliPath = path;
     log.info("使用本机 Claude Code: %s", path);
   }
-  async shutdown(): Promise<void> {}
-
   async reply(uid: string, text: string, workspace: string, attachments: string[], opts: ReplyOpts = {}): Promise<ReplyResult> {
     const images = attachments.filter(a => IMG_EXTS.has(extname(a).toLowerCase()));
     const others = attachments.filter(a => !IMG_EXTS.has(extname(a).toLowerCase()));
@@ -64,12 +62,11 @@ export class ClaudeAgent implements Agent {
     if (opts.abortController) baseOptions.abortController = opts.abortController;
     if (dangerOn && opts.askPermission) baseOptions.canUseTool = makeCanUseTool(uid, opts.askPermission);
 
-    // 执行一次 query；返回 { sessionId, text, error }。error 非 null 表示 resume 失败等可重试错误。
+    // 执行一次 query；只有明确的“会话不存在”才允许无 resume 重试，避免重复执行有副作用的任务。
     const runOnce = async (resume?: string): Promise<{ sessionId?: string; text: string; retryable?: boolean }> => {
       const options: Options = { ...baseOptions };
       if (resume) options.resume = resume;
       let capturedSessionId: string | undefined;
-      let resultError = false;
       const parts: string[] = [];
       const collect = async (prompt: string | AsyncIterable<unknown>) => {
         for await (const msg of query({ prompt: prompt as any, options })) {
@@ -81,9 +78,10 @@ export class ClaudeAgent implements Agent {
           } else if (m.type === "result") {
             capturedSessionId = m.session_id;
             if (m.subtype !== "success") {
-              log.warn("claude result 非成功: %s is_error=%s", m.subtype, m.is_error);
-              // error_during_execution 通常是 resume 的 session 不存在（跨机器/被清理）
-              if (m.subtype === "error_during_execution") resultError = true;
+              const details = Array.isArray(m.errors) && m.errors.length
+                ? m.errors.join("; ")
+                : `subtype=${m.subtype} is_error=${m.is_error}`;
+              throw new Error(`Claude 执行失败: ${details}`);
             }
           }
         }
@@ -95,7 +93,13 @@ export class ClaudeAgent implements Agent {
             await collect(userStream(promptText, imageBlocks));
           } catch (e) {
             if ((e as Error).name === "AbortError") throw e;
+            const message = (e as Error).message ?? "";
+            if (!/(?:unsupported|invalid)[^;]*(?:image|media|content block)|(?:image|media)[^;]*(?:unsupported|invalid)/i.test(message)) {
+              throw e;
+            }
             log.warn("图片 image block 注入失败，回退到 Read 方式: %s", (e as Error).message);
+            parts.length = 0;
+            capturedSessionId = undefined;
             await collect(buildPrompt(text, attachments, [], workspace));
           }
         } else {
@@ -104,18 +108,18 @@ export class ClaudeAgent implements Agent {
       } catch (e) {
         // /stop 或会话切换触发的中断：不重试，直接上抛
         if ((e as Error).name === "AbortError") throw e;
-        // resume 的 session 不存在时 SDK 会抛 "No conversation found with session ID"
+        // resume 的 session 不存在时 SDK 会抛错或在 result.errors 中返回同类消息。
         const msg = (e as Error).message ?? "";
-        if (resume && /No conversation found/i.test(msg)) {
+        if (resume && /No conversation found|session[^;]*(?:not found|does not exist)|resume[^;]*failed/i.test(msg)) {
           log.warn("resume 的 session 不存在，降级为新会话重试: %s", msg);
           return { text: "", retryable: true };
         }
         throw e;
       }
-      return { sessionId: capturedSessionId, text: parts.join("").trim(), retryable: resultError };
+      return { sessionId: capturedSessionId, text: parts.join("").trim() };
     };
 
-    // 首次带 resume（若有）；resume 失败（session 不存在 / error_during_execution）自动降级为新会话
+    // 首次带 resume（若有）；只有明确的 session 不存在/续接失败才降级为新会话。
     let res = await runOnce(opts.sessionId ?? undefined);
     if (res.retryable) {
       log.warn("首次 query 失败，降级为新会话重试（旧 sessionId=%s）", opts.sessionId ?? "(无)");
@@ -136,8 +140,8 @@ function makeCanUseTool(uid: string, askPermission: AskPermission) {
       }
       return { behavior: "allow" };
     } catch (e) {
-      log.warn("canUseTool 异常，默认放行: %s", (e as Error).message);
-      return { behavior: "allow" };
+      log.warn("canUseTool 异常，默认拒绝: %s", (e as Error).message);
+      return { behavior: "deny", message: "危险操作审批失败，已按安全策略拒绝。" };
     }
   };
   return cb as any; // SDK 的 CanUseTool 多一个 options 参数；我们忽略它

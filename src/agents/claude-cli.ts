@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -75,7 +75,11 @@ function resolveCliFromCmd(cmdPath: string): string | null {
 function usableFile(path: string | undefined | null): string | null {
   if (!path) return null;
   const full = resolve(expandHome(path.trim().replace(/^"|"$/g, "")));
-  if (!existsSync(full)) return null;
+  try {
+    if (!statSync(full).isFile()) return null;
+  } catch {
+    return null;
+  }
 
   const ext = extname(full).toLowerCase();
   if (ext === ".cmd" || ext === ".ps1") {

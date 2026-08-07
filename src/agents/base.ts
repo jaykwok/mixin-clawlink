@@ -1,7 +1,7 @@
 /**
  * Agent 抽象接口。bot 负责下载入站附件、调用 reply、发送结构化文件结果。
  *
- * 多轮记忆：Claude 靠 SDK 原生 resume（opts.sessionId），不再注入历史。
+ * 多轮记忆由各适配器通过 opts.sessionId 使用原生续接机制，不由 bot 注入历史。
  * 危险操作审批：opts.askPermission 回调；中断：opts.abortController（/stop）。
  */
 export type AskPermission = (uid: string, tool: string, summary: string) => Promise<boolean>;
@@ -40,7 +40,7 @@ export interface ReplyOpts {
 export interface ReplyResult {
   /** agent 的文本回复。 */
   text: string;
-  /** agent 明确声明要回传的文件；旧 agent 仍可在 text 中使用 [[FILE:]]。 */
+  /** agent 明确声明要回传的文件；Claude 适配器仍可在 text 中使用 [[FILE:]]。 */
   files?: string[];
   /** 本次 query 的原生会话 ID，供 registry 回写以便下次精确续接。 */
   sessionId?: string;

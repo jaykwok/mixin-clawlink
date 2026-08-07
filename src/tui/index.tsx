@@ -16,9 +16,9 @@ import { execFile } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { cfg, reload, setValue, writeEnvRaw } from "../config.ts";
 import { setSuppressConsole, subscribeConsole } from "../logger.ts";
-import { fetchAgentModels } from "../agents/models.ts";
+import { isAgyAgentName, normalizeAgentKind } from "../agents/kind.ts";
+import { fetchAgentModels, modelProfileForAgent } from "../agents/models.ts";
 import { registry } from "../session/registry.ts";
-import { getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 import type { Bot } from "../bot.ts";
 import { cycleView, movePageSelection, numberedIndex, pageInfo, type PanelViewName } from "./navigation.ts";
 
@@ -64,7 +64,6 @@ const [terminalSize, setTerminalSize] = createSignal({ width: process.stdout.col
 const [fIdx, setFIdx] = createSignal(0);
 const [draft, setDraft] = createSignal("");
 const [wizardFocus, setWizardFocus] = createSignal<"fields" | "editor">("fields");
-const [workspaceConfirm, setWorkspaceConfirm] = createSignal(false);
 // 会话视图
 const [users, setUsers] = createSignal<string[]>([]);
 const [selUser, setSelUser] = createSignal(0);
@@ -81,6 +80,7 @@ const [actions, setActions] = createSignal<string[]>([]);
 const [selAct, setSelAct] = createSignal(0);
 
 let currentBot: Bot | null = null;
+let detachWsStatus: (() => void) | null = null;
 let renderer: any = null;
 let wizardResolve: (() => void) | null = null;
 let wizardDone = false;
@@ -90,6 +90,7 @@ let resizeHandler: (() => void) | null = null;
 let replaceOnFirstEdit = false;
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
+const activeAgent = () => currentBot?.agent.name ?? cfg.AGENT;
 function tailWindow(value: string, maxChars: number): string {
   const chars = Array.from(value);
   if (chars.length <= maxChars) return value;
@@ -106,13 +107,13 @@ const WIZARD_FIELDS: WField[] = [
   { label: "WORKSPACE 工作目录（agent 操作文件的根目录，必填）", get: () => cfg.WORKSPACE, set: v => setValue("WORKSPACE", v) },
   { label: "SYSTEM_PROMPT 系统提示词", get: () => cfg.SYSTEM_PROMPT, set: v => setValue("SYSTEM_PROMPT", v) },
   { label: "CLAUDE_MODEL（留空=默认）", get: () => cfg.CLAUDE_MODEL ?? "", set: v => setValue("CLAUDE_MODEL", v) },
-  { label: "ALLOWED_TOOLS（逗号分隔）", get: () => cfg.CLAUDE_ALLOWED_TOOLS.join(","), set: v => setValue("CLAUDE_ALLOWED_TOOLS", v) },
-  { label: "CLAUDE_CLI_PATH（留空=内置）", get: () => cfg.CLAUDE_CLI_PATH ?? "", set: v => setValue("CLAUDE_CLI_PATH", v) },
+  { label: "CLAUDE_ALLOWED_TOOLS（逗号分隔）", get: () => cfg.CLAUDE_ALLOWED_TOOLS.join(","), set: v => setValue("CLAUDE_ALLOWED_TOOLS", v) },
+  { label: "CLAUDE_CLI_PATH（留空=自动查找）", get: () => cfg.CLAUDE_CLI_PATH ?? "", set: v => setValue("CLAUDE_CLI_PATH", v) },
   { label: "CLAUDE_PERMISSION 权限模式", get: () => cfg.CLAUDE_PERMISSION, set: v => setValue("CLAUDE_PERMISSION", v), choices: ["default", "acceptEdits", "bypassPermissions", "plan", "dontAsk", "auto"] },
-  { label: "FILE_RETURN_INSTRUCTION 回传文件提示", get: () => cfg.FILE_RETURN_INSTRUCTION, set: v => setValue("FILE_RETURN_INSTRUCTION", v) },
+  { label: "CLAUDE_FILE_RETURN_INSTRUCTION 回传文件提示", get: () => cfg.FILE_RETURN_INSTRUCTION, set: v => setValue("FILE_RETURN_INSTRUCTION", v) },
   { label: "MAX_FILE_MB", get: () => String(cfg.MAX_FILE_MB), set: v => setValue("MAX_FILE_MB", v) },
-  { label: "DANGER_CONFIRM（1/0）", get: () => (cfg.CLAUDE_DANGER_CONFIRM ? "1" : "0"), set: v => setValue("CLAUDE_DANGER_CONFIRM", v), choices: ["1", "0"] },
-  { label: "DANGER_PATTERNS（用 || 分隔）", get: () => cfg.CLAUDE_DANGER_PATTERNS.join("||"), set: v => setValue("CLAUDE_DANGER_PATTERNS", v) },
+  { label: "CLAUDE_DANGER_CONFIRM（1/0）", get: () => (cfg.CLAUDE_DANGER_CONFIRM ? "1" : "0"), set: v => setValue("CLAUDE_DANGER_CONFIRM", v), choices: ["1", "0"] },
+  { label: "CLAUDE_DANGER_PATTERNS（用 || 分隔）", get: () => cfg.CLAUDE_DANGER_PATTERNS.join("||"), set: v => setValue("CLAUDE_DANGER_PATTERNS", v) },
   { label: "AGY_CLI_PATH（留空=自动查找）", get: () => cfg.AGY_CLI_PATH ?? "", set: v => setValue("AGY_CLI_PATH", v) },
   { label: "AGY_MODEL（1.1.10+ 稳定 slug；留空=默认）", get: () => cfg.AGY_MODEL ?? "", set: v => setValue("AGY_MODEL", v) },
   { label: "AGY_EFFORT 推理强度（留空=默认）", get: () => cfg.AGY_EFFORT ?? "", set: v => setValue("AGY_EFFORT", v), choices: ["", "low", "medium", "high"] },
@@ -121,7 +122,6 @@ const WIZARD_FIELDS: WField[] = [
   { label: "AGY_PERMISSION 权限策略", get: () => cfg.AGY_PERMISSION, set: v => setValue("AGY_PERMISSION", v), choices: ["bypass", "settings"] },
   { label: "AGY_SANDBOX（1/0）", get: () => (cfg.AGY_SANDBOX ? "1" : "0"), set: v => setValue("AGY_SANDBOX", v), choices: ["1", "0"] },
   { label: "AGY_TIMEOUT_S 单轮超时秒数", get: () => String(cfg.AGY_TIMEOUT_S), set: v => setValue("AGY_TIMEOUT_S", v) },
-  { label: "QUANTUM_ACCOUNT（可选）", get: () => cfg.QUANTUM_ACCOUNT ?? "", set: v => writeEnvRaw("MIXIN_QUANTUM_ACCOUNT", v) },
   { label: "BOT_USER_ID（可选，anti-loop）", get: () => cfg.BOT_USER_ID ?? "", set: v => writeEnvRaw("MIXIN_BOT_USER_ID", v) },
 ];
 
@@ -219,18 +219,6 @@ function commitField(): boolean {
   catch (e) { setStatusMsg(`⚠️ ${(e as Error).message}`); return false; }
 }
 function finalizeWizard(): void {
-  // 工作目录为空时弹确认：是否使用默认 ./workspace
-  if (!workspaceConfirm() && !cfg.WORKSPACE.trim()) {
-    setWorkspaceConfirm(true);
-    setStatusMsg("⚠️ 工作目录为空。按 Enter 使用默认 ./workspace，或 Esc 返回填写");
-    return;
-  }
-  if (workspaceConfirm()) {
-    // 用户确认使用默认值
-    try { setValue("WORKSPACE", "./workspace"); }
-    catch (e) { setStatusMsg(`⚠️ ${(e as Error).message}`); setWorkspaceConfirm(false); return; }
-    setWorkspaceConfirm(false);
-  }
   if (!commitField()) return;
   if (!cfg.APP_ID || !cfg.APP_SECRET) { setStatusMsg("❌ APP_ID / APP_SECRET 不能为空，无法启动"); return; }
   if (wizardFromPanel) {
@@ -277,10 +265,15 @@ async function refreshUsers(): Promise<void> {
 async function actionPickModel(): Promise<void> {
   setStatusMsg("拉取模型列表…");
   try {
-    const ms = await fetchAgentModels();
+    const agent = activeAgent();
+    const profile = modelProfileForAgent(agent);
+    if (!profile) {
+      setStatusMsg(`⚠️ 当前 agent=${normalizeAgentKind(agent)} 不支持模型选择`);
+      return;
+    }
+    const ms = await fetchAgentModels(agent);
     setModelList(ms.map(m => m.id)); setSelAct(0); setModelPick(true);
-    const src = (cfg.AGENT.toLowerCase() === "antigravity" || cfg.AGENT.toLowerCase() === "agy") ? "agy models" : "Claude /models";
-    setStatusMsg(`拉到 ${ms.length} 个模型（数字或 Enter 确认 / Esc 返回）· 来源: ${src}`);
+    setStatusMsg(`拉到 ${ms.length} 个模型（数字或 Enter 确认 / Esc 返回）· 来源: ${profile.sourceLabel}`);
   } catch (e) { setStatusMsg(`⚠️ ${(e as Error).message}（可改用 IM 里 /model <名字>）`); }
 }
 function actionReboot(): void {
@@ -374,23 +367,6 @@ function handleKey(key: KeyEvent): void {
 }
 
 function handleWizardKey(name: string, seq: string, shift: boolean): void {
-  // 工作目录空值确认模式
-  if (workspaceConfirm()) {
-    if (name === "return" || name === "enter") {
-      // 确认使用默认 ./workspace，继续 finalize
-      finalizeWizard();
-      return;
-    }
-    if (name === "escape") {
-      setWorkspaceConfirm(false);
-      setStatusMsg("已取消；请填写工作目录后再按 Ctrl+S 保存");
-      // 跳到 WORKSPACE 字段
-      const wsIdx = WIZARD_FIELDS.findIndex(f => f.label.startsWith("WORKSPACE"));
-      if (wsIdx >= 0) selectWizardField(wsIdx);
-      return;
-    }
-    return; // 锁定其他按键
-  }
   if (name === "escape") {
     if (wizardFocus() === "editor") {
       setDraft(WIZARD_FIELDS[fIdx()].get());
@@ -492,13 +468,18 @@ async function activateNumberedPanelItem(digit: number): Promise<void> {
 
 async function loadSessionHistory(uid: string, sessionNum: number): Promise<void> {
   try {
-    // agy 无 SDK 拉历史，降级提示
-    if (cfg.AGENT === "antigravity") {
-      setSessionHistory("（agy CLI 模式不支持拉取对话历史；会话续接靠 --conversation <uuid>，历史存在 ~/.gemini/antigravity-cli/conversations/）");
+    const agent = normalizeAgentKind(activeAgent());
+    if (isAgyAgentName(agent)) {
+      setSessionHistory("（agy CLI 模式不支持通过连接器拉取对话历史；会话由 agy 通过 --conversation <uuid> 原生续接。）");
       return;
     }
-    const sid = await registry.getSessionIdByNum(uid, sessionNum);
+    if (agent !== "claude") {
+      setSessionHistory(`（当前 agent=${agent} 不支持对话历史浏览）`);
+      return;
+    }
+    const sid = await registry.getSessionIdByNum(uid, sessionNum, agent);
     if (!sid) { setSessionHistory("（该会话尚无 Claude session_id，发一条消息后才会产生）"); return; }
+    const { getSessionMessages } = await import("@anthropic-ai/claude-agent-sdk");
     const msgs = await getSessionMessages(sid, { limit: 50 });
     if (!msgs.length) { setSessionHistory("（无对话记录）"); return; }
     const lines: string[] = [];
@@ -577,9 +558,10 @@ async function activatePanel(indexOverride?: number): Promise<void> {
     if (modelPick()) {
       const id = modelList()[activeIndex];
       if (!id) return;
-      const isAgy = cfg.AGENT.toLowerCase() === "antigravity" || cfg.AGENT.toLowerCase() === "agy";
-      const modelKey = isAgy ? "AGY_MODEL" : "CLAUDE_MODEL";
-      try { setValue(modelKey, id); setStatusMsg(`✅ 模型 → ${id}（下条消息生效）`); }
+      const agent = activeAgent();
+      const profile = modelProfileForAgent(agent);
+      if (!profile) { setStatusMsg(`⚠️ 当前 agent=${normalizeAgentKind(agent)} 不支持模型选择`); return; }
+      try { setValue(profile.configKey, id); setStatusMsg(`✅ 模型 → ${id}（下条消息生效）`); }
       catch (e) { setStatusMsg(`⚠️ ${(e as Error).message}`); }
       refreshActions();
     } else {
@@ -676,7 +658,6 @@ function LogsView() {
 function SessionsView() {
   const userPage = () => pageInfo(users().length, selUser());
   const userVisible = () => users().slice(userPage().start, userPage().end);
-  const wide = () => terminalSize().width >= 110;
   const focus = () => sessionFocus();
   const sessPage = () => pageInfo(sessionList().length, selSession());
   const sessVisible = () => sessionList().slice(sessPage().start, sessPage().end);
@@ -726,9 +707,14 @@ function ActionsView() {
   const page = () => pageInfo(list().length, selAct());
   const visible = () => list().slice(page().start, page().end);
   const title = () => (modelPick() ? " 模型目录 " : " 快捷操作 ");
-  const detail = () => modelPick()
-    ? `选择后写入 ${(() => { const isAgy = cfg.AGENT.toLowerCase() === "antigravity" || cfg.AGENT.toLowerCase() === "agy"; return isAgy ? "AGY_MODEL" : "CLAUDE_MODEL"; })()}\n下条消息生效\n\n来源：${(() => { const isAgy = cfg.AGENT.toLowerCase() === "antigravity" || cfg.AGENT.toLowerCase() === "agy"; return isAgy ? "agy models" : "Claude /models"; })()}`
-    : `${ACTION_LIST[selAct()]?.label ?? "—"}\n\n${ACTION_LIST[selAct()]?.detail ?? "请选择一项操作"}`;
+  const detail = () => {
+    if (!modelPick()) return `${ACTION_LIST[selAct()]?.label ?? "—"}\n\n${ACTION_LIST[selAct()]?.detail ?? "请选择一项操作"}`;
+    const agent = activeAgent();
+    const profile = modelProfileForAgent(agent);
+    return profile
+      ? `选择后写入 ${profile.configKey}\n下条消息生效\n\n来源：${profile.sourceLabel}`
+      : `当前 agent=${normalizeAgentKind(agent)} 不支持模型选择`;
+  };
   return (
     <box width="100%" height="100%" flexGrow={1} flexBasis={0} flexDirection="row" gap={1}>
       <box flexGrow={3} flexShrink={1} flexBasis={0} border borderColor={C.border} backgroundColor={C.panel} title={title()} titleColor={C.accent} bottomTitle={pageLabel(list().length, selAct())} bottomTitleAlignment="right">
@@ -811,7 +797,7 @@ function WizardView() {
           <box width="100%" height={2} flexShrink={0} overflow="hidden"><text fg={C.text} wrapMode="word" truncate> {current().label}</text></box>
           {wizardFocus() === "editor" && current().choices?.length ? (
             <box width="100%" flexGrow={1} flexShrink={1} flexBasis={0} overflow="hidden" border borderColor={C.cyan} backgroundColor={C.input} title=" 请选择 " titleColor={C.cyan} flexDirection="column">
-              {current().choices?.map((choice, index) => {
+              {current().choices?.map((choice) => {
                 const selected = () => choice.toLowerCase() === draft().toLowerCase();
                 return (
                   <box width="100%" height={1} flexShrink={0} overflow="hidden" backgroundColor={selected() ? C.selected : C.input}>
@@ -887,7 +873,6 @@ export interface TuiHandle {
   waitForWizard: () => Promise<void>;
   attachBot: (bot: Bot) => void;
   detachBot: () => void;
-  isDestroyed: () => boolean;
   shutdown: () => Promise<void>;
 }
 
@@ -929,19 +914,26 @@ export async function startTui(opts: { onQuit: () => void }): Promise<TuiHandle>
       wizardResolve = resolve;
     }),
     attachBot: (bot: Bot) => {
+      detachWsStatus?.();
       currentBot = bot;
       setAgentName(bot.agent.name);
       const ws = bot.getWsStatus();
       setWsStatus({ status: ws.status, attempt: ws.attempt });
-      bot.onWsStatus((s, attempt) => setWsStatus({ status: s, attempt }));
+      detachWsStatus = bot.onWsStatus((s, attempt) => setWsStatus({ status: s, attempt }));
       setAuthStatus(bot.getAuthStatus());
       setStatusMsg("");
       void refreshUsers();
     },
-    detachBot: () => { /* 旧 ws 回调随旧 ConnectionManager 一起作废；attachBot 会重接 */ },
-    isDestroyed: () => renderer === null,
+    detachBot: () => {
+      detachWsStatus?.();
+      detachWsStatus = null;
+      currentBot = null;
+    },
     shutdown: async () => {
       clearInterval(flush); clearInterval(authTimer); clearInterval(usersTimer); clearInterval(trayTimer);
+      detachWsStatus?.();
+      detachWsStatus = null;
+      currentBot = null;
       if (resizeHandler) { process.stdout.off("resize", resizeHandler); resizeHandler = null; }
       unsub();
       setSuppressConsole(false);

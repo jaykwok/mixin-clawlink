@@ -50,7 +50,6 @@ export interface Cfg {
   WS_BASE: string;
   APP_ID: string;
   APP_SECRET: string;
-  QUANTUM_ACCOUNT: string | null;
   BOT_USER_ID: string | null;
   AGENT: string;
   WORKSPACE: string;
@@ -63,7 +62,7 @@ export interface Cfg {
   MAX_FILE_MB: number;
   CLAUDE_DANGER_CONFIRM: boolean;
   CLAUDE_DANGER_PATTERNS: string[]; // 正则源串（isDangerous 时编译）
-  // agy CLI 适配器配置（AGENT=agy 时生效）
+  // agy CLI 适配器配置（AGENT=antigravity 时生效）
   AGY_CLI_PATH: string | null;
   AGY_MODEL: string | null;
   /** agy 1.1.10+ reasoning effort；留空时由模型/agy 决定。 */
@@ -95,9 +94,8 @@ export const cfg: Cfg = {
   WS_BASE: "",
   APP_ID: "",
   APP_SECRET: "",
-  QUANTUM_ACCOUNT: null,
   BOT_USER_ID: null,
-  AGENT: "echo",
+  AGENT: "antigravity",
   WORKSPACE: "./workspace",
   SYSTEM_PROMPT: "",
   FILE_RETURN_INSTRUCTION: "",
@@ -140,19 +138,20 @@ function envStr(k: string, def: string): string {
 function apply(): void {
   cfg.ENV = (envStr("MIXIN_ENV", "production")).trim() || "production";
   const base = _ENDPOINTS[cfg.ENV] ?? _ENDPOINTS.production;
-  cfg.API_BASE = (envStr("MIXIN_API_URL", base)).trim().replace(/\/+$/, "");
-  cfg.WS_BASE = (envStr("MIXIN_WS_URL",
-    cfg.API_BASE.replace("https://", "wss://").replace("http://", "ws://"))).trim().replace(/\/+$/, "");
+  const apiOverride = envStr("MIXIN_API_URL", "").trim();
+  cfg.API_BASE = (apiOverride || base).replace(/\/+$/, "");
+  const wsDefault = cfg.API_BASE.replace("https://", "wss://").replace("http://", "ws://");
+  const wsOverride = envStr("MIXIN_WS_URL", "").trim();
+  cfg.WS_BASE = (wsOverride || wsDefault).replace(/\/+$/, "");
 
   cfg.APP_ID = envStr("MIXIN_APP_ID", "").trim();
   cfg.APP_SECRET = envStr("MIXIN_APP_SECRET", "").trim();
-  cfg.QUANTUM_ACCOUNT = envStr("MIXIN_QUANTUM_ACCOUNT", "").trim() || null;
   cfg.BOT_USER_ID = envStr("MIXIN_BOT_USER_ID", "").trim() || null;
 
-  cfg.AGENT = envStr("MIXIN_AGENT", "echo").trim().toLowerCase();
+  cfg.AGENT = envStr("MIXIN_AGENT", "antigravity").trim().toLowerCase() || "antigravity";
   cfg.WORKSPACE = resolve(expandHome(envStr("MIXIN_WORKSPACE", "./workspace")));
   cfg.SYSTEM_PROMPT = env("MIXIN_SYSTEM_PROMPT") ?? "你是用户的私人助理，用中文简洁回复。";
-  cfg.FILE_RETURN_INSTRUCTION = env("MIXIN_FILE_RETURN_INSTRUCTION") ?? _DEFAULT_FILE_RETURN_INSTRUCTION;
+  cfg.FILE_RETURN_INSTRUCTION = env("MIXIN_FILE_RETURN_INSTRUCTION")?.trim() || _DEFAULT_FILE_RETURN_INSTRUCTION;
 
   cfg.CLAUDE_ALLOWED_TOOLS = (envStr("MIXIN_CLAUDE_ALLOWED_TOOLS", "Read,Write,Edit,Bash,Glob,Grep"))
     .split(",").map(t => t.trim()).filter(Boolean);
@@ -163,7 +162,8 @@ function apply(): void {
     .includes(permission as Cfg["CLAUDE_PERMISSION"])
     ? permission as Cfg["CLAUDE_PERMISSION"]
     : "auto";
-  cfg.MAX_FILE_MB = parseInt(envStr("MIXIN_MAX_FILE_MB", "30"), 10) || 30;
+  const maxFileMb = Number.parseInt(envStr("MIXIN_MAX_FILE_MB", "30"), 10);
+  cfg.MAX_FILE_MB = Number.isFinite(maxFileMb) && maxFileMb > 0 ? maxFileMb : 30;
 
   cfg.CLAUDE_DANGER_CONFIRM = ["1", "true", "yes", "on"].includes(envStr("MIXIN_CLAUDE_DANGER_CONFIRM", "1").trim().toLowerCase());
   const pats = envStr("MIXIN_CLAUDE_DANGER_PATTERNS", "").trim();
@@ -215,7 +215,7 @@ export interface EditableEntry {
   allowEmpty?: boolean;
 }
 
-// APP_ID / APP_SECRET 故意不在此列（凭据，不走聊天框）。HISTORY_TURNS 已废弃（改用 SDK resume）。
+// APP_ID / APP_SECRET 故意不在此列（凭据，不走聊天框）。
 export const EDITABLE: EditableEntry[] = [
   { key: "AGENT", env: "MIXIN_AGENT", kind: "choice", restart: true, choices: ["echo", "claude", "antigravity"], desc: "agent 类型（echo 测试 / claude 实战 / antigravity Antigravity CLI）" },
   { key: "WORKSPACE", env: "MIXIN_WORKSPACE", kind: "path", restart: true, desc: "默认工作目录根" },
@@ -313,7 +313,10 @@ export function setValue(key: string, raw: string): string {
 
 /** 把 env_name=value 写回 .env：有则改、无则追加；其它行（含 APP_ID/SECRET）原样保留。 */
 function writeEnv(envName: string, value: string): void {
-  const lineToWrite = `${envName}="${value}"`;
+  if (/\r|\n/.test(value)) throw new Error(`${envName} 暂不支持换行；请改为单行值`);
+  const quote = !value.includes('"') ? '"' : !value.includes("'") ? "'" : !value.includes("`") ? "`" : null;
+  if (!quote) throw new Error(`${envName} 同时包含三种引号，无法安全写入 .env`);
+  const lineToWrite = `${envName}=${quote}${value}${quote}`;
   const lines: string[] = [];
   let found = false;
   if (existsSync(DOTENV)) {

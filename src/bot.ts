@@ -10,7 +10,8 @@ import { checkCredentials, cfg, EDITABLE, getValue, lookup, setValue, INBOX_DIR 
 import { expandHome } from "./config.ts";
 import { makeAgent } from "./agents/index.ts";
 import type { Agent, AgentProgress, AgentRunMeta } from "./agents/base.ts";
-import { fetchAgentModels, type ModelInfo } from "./agents/models.ts";
+import { isAgyAgentName } from "./agents/kind.ts";
+import { fetchAgentModels, modelProfileForAgent, type ModelInfo } from "./agents/models.ts";
 import { initAgentInstructions, needsAgentInstructions } from "./agents/instructions.ts";
 import { TokenManager } from "./im/auth.ts";
 import { MessagePipe } from "./im/messages.ts";
@@ -59,6 +60,7 @@ export class Bot {
   private readonly ws: ConnectionManager;
   private readonly workspace = new Workspace();
   private readonly locks = new Map<string, Promise<void>>();
+  private readonly taskEpoch = new Map<string, number>();
   private readonly running = new Map<string, AbortController>(); // uid -> 当前任务的 AbortController
   private readonly runningProgress = new Map<string, string>(); // uid -> agy stream-json 最新进度
   private readonly lastRunMeta = new Map<string, AgentRunMeta>();
@@ -120,6 +122,7 @@ export class Bot {
     if (this.stopped) return;
     this.stopped = true;
     this.stopServe();
+    for (const resolve of [...this.pending.values()]) resolve(false);
     for (const ac of this.running.values()) {
       try {
         ac.abort();
@@ -130,7 +133,6 @@ export class Bot {
     this.running.clear();
     await this.ws.stop();
     await this.agent.shutdown?.();
-    await this.pipe.aclose();
     log.info("Mixin ClawLink 已停止");
   }
 
@@ -174,31 +176,40 @@ export class Bot {
     const send = (s: string) => this.pipe.sendText(uid, s);
 
     if (cmd === "/new") {
-      this.stopRunning(uid);
-      const n = await registry.newSession(uid);
+      this.cancelTasks(uid);
+      const n = await registry.newSession(uid, this.agent.name, this.workspace.currentDir(uid));
+      this.clearSessionRuntime(uid);
       await send(`🆕 已新开会话（第 ${n} 个，已切到它）。`);
     } else if (cmd === "/list") {
       await send(await this.fmtSessions(uid));
     } else if (cmd === "/use") {
       const num = parseInt1(text);
       if (num && await registry.switchSession(uid, num)) {
-        this.stopRunning(uid);
+        this.cancelTasks(uid);
+        this.clearSessionRuntime(uid);
         await send(`↪ 已切到第 ${num} 个会话。`);
       } else {
         await send("⚠️ 没有这个编号的会话，/list 看看。");
       }
     } else if (cmd === "/reset") {
-      this.stopRunning(uid);
-      await registry.resetSession(uid);
+      this.cancelTasks(uid);
+      await registry.resetSession(uid, this.agent.name, this.workspace.currentDir(uid));
+      this.clearSessionRuntime(uid);
       await send(`🧹 已清空当前会话（下次对话开启新的 ${this.agent.name} session）。`);
     } else if (cmd === "/del") {
       const nums = parseIntList(text);
       if (!nums.length) {
         await send("⚠️ 用法: /del 1 或 /del 1,3");
       } else {
-        this.stopRunning(uid);
-        const { deleted, activeDeleted, remaining, deletedNums } = await registry.deleteSessions(uid, nums);
+        this.cancelTasks(uid);
+        const { deleted, activeDeleted, remaining, deletedNums } = await registry.deleteSessions(
+          uid,
+          nums,
+          this.agent.name,
+          this.workspace.currentDir(uid),
+        );
         const label = deletedNums.map(n => `#${n}`).join(" ");
+        if (activeDeleted) this.clearSessionRuntime(uid);
         if (deleted === 0) {
           await send("⚠️ 没有这些编号的会话，/list 看看。");
         } else if (activeDeleted && remaining === 1) {
@@ -230,7 +241,7 @@ export class Bot {
       await send("🔄 软重启中（重读 .env、重建 agent/WS，几秒后恢复）…");
       this.requestReboot(uid);
     } else if (cmd === "/stop") {
-      const stopped = this.stopRunning(uid);
+      const stopped = this.cancelTasks(uid);
       await send(stopped ? "⏹ 已停止当前任务。" : "（当前没有正在执行的任务）");
     } else if (cmd === "/cwd") {
       const arg = text.slice(text.indexOf(" ") >= 0 ? text.indexOf(" ") + 1 : text.length).trim();
@@ -239,7 +250,9 @@ export class Bot {
       } else {
         try {
           const nw = await this.workspace.setCwd(uid, arg);
-          await send(`📁 工作目录已切换: ${nw}`);
+          this.cancelTasks(uid);
+          this.clearSessionRuntime(uid);
+          await send(`📁 工作目录已切换: ${nw}\n若当前会话属于其他工作目录，下条消息会自动开启新的 ${this.agent.name} session。`);
         } catch (e) {
           await send(`⚠️ 切换失败: ${(e as Error).message}`);
         }
@@ -256,18 +269,28 @@ export class Bot {
       const sessions = await registry.listSessions(uid);
       const active = sessions.find(s => s.active)?.num;
       const turns = await registry.countTurns(uid);
-      const agyState = isAgyAgent()
-        ? `\n模型: ${cfg.AGY_MODEL || "默认"}\n推理强度: ${cfg.AGY_EFFORT || "默认"}\nsandbox: ${cfg.AGY_SANDBOX ? "开" : "关"}\n超时: ${cfg.AGY_TIMEOUT_S}s`
-        : "";
+      const lines = [`- agent: ${this.agent.name}`];
+      if (this.isAgyAgent()) {
+        lines.push(
+          `- 模型: ${cfg.AGY_MODEL || "默认"}`,
+          `- 推理强度: ${cfg.AGY_EFFORT || "默认"}`,
+          `- sandbox: ${cfg.AGY_SANDBOX ? "开" : "关"}`,
+          `- 超时: ${cfg.AGY_TIMEOUT_S}s`,
+        );
+      }
+      lines.push(`- 工作目录: ${wd}`);
       const progress = this.runningProgress.get(uid);
       const meta = formatRunMeta(this.lastRunMeta.get(uid));
-      await send(`agent: ${this.agent.name}${agyState}\n工作目录: ${wd}\n当前会话: ${active ? `第${active}个` : "无"}/${sessions.length}（${turns} 轮）${progress ? `\n运行中: ${progress}` : ""}${meta ? `\n上轮: ${meta}` : ""}`);
+      lines.push(`- 当前会话: ${active ? `第${active}个` : "无"}/${sessions.length}（${turns} 轮）`);
+      if (progress) lines.push(`- 运行中: ${progress}`);
+      if (meta) lines.push(`- 上轮: ${meta}`);
+      await send(lines.join("\n"));
     } else if (cmd === "/model") {
       await this.handleModel(uid, text);
     } else if (cmd === "/effort") {
       await this.handleEffort(uid, text);
     } else if (cmd === "/agy") {
-      if (!isAgyAgent()) {
+      if (!this.isAgyAgent()) {
         await send("⚠️ /agy 仅在 AGENT=antigravity 时可用。");
         return;
       }
@@ -279,8 +302,8 @@ export class Bot {
       // 显式命名空间避免与 ClawLink 自身的 /model、/use 等命令冲突。
       void this.dispatch({ ...msg, text: forwardedText });
     } else if (cmd === "/help") {
-      const lines = ["命令列表:"];
-      for (const [c, d] of Object.entries(COMMANDS)) lines.push(`${c} — ${d}`);
+      const lines = ["命令列表:", ""];
+      for (const [c, d] of Object.entries(COMMANDS)) lines.push(`- \`${c}\` — ${d}`);
       lines.push("\n（其它消息会作为指令发给 agent 执行）");
       await send(lines.join("\n"));
     } else {
@@ -320,14 +343,16 @@ export class Bot {
   private async handleModel(uid: string, text: string): Promise<void> {
     const send = (s: string) => this.pipe.sendText(uid, s);
     const arg = text.slice(text.indexOf(" ") >= 0 ? text.indexOf(" ") + 1 : text.length).trim();
-    const isAgy = cfg.AGENT.toLowerCase() === "antigravity" || cfg.AGENT.toLowerCase() === "agy";
-    const modelKey = isAgy ? "AGY_MODEL" : "CLAUDE_MODEL";
-    const cur = isAgy ? cfg.AGY_MODEL : cfg.CLAUDE_MODEL;
-    const sourceLabel = isAgy ? "agy models" : "Claude Code 网关";
+    const profile = modelProfileForAgent(this.agent.name);
+    if (!profile) {
+      await send(`⚠️ 当前 agent=${this.agent.name} 不支持模型选择。`);
+      return;
+    }
+    const { configKey: modelKey, current: cur, sourceLabel } = profile;
 
     if (!arg) {
       try {
-        await send(fmtModels(await fetchAgentModels(), cur, sourceLabel));
+        await send(fmtModels(await fetchAgentModels(this.agent.name), cur, sourceLabel));
       } catch (e) {
         await send(`⚠️ 拉不到模型列表: ${(e as Error).message}\n可直接 /model <模型名> 指定，或 /model default 用默认。`);
       }
@@ -341,7 +366,7 @@ export class Bot {
     if (/^\d+$/.test(arg)) {
       const n = parseInt(arg, 10);
       try {
-        const models = await fetchAgentModels();
+        const models = await fetchAgentModels(this.agent.name);
         const m = models[n - 1];
         if (!m) { await send(`⚠️ 没有第 ${n} 个模型，/model 看列表。`); return; }
         setValue(modelKey, m.id);
@@ -363,7 +388,7 @@ export class Bot {
   /** agy 1.1.10+ /effort：热改下次 headless 启动所用的 reasoning effort。 */
   private async handleEffort(uid: string, text: string): Promise<void> {
     const send = (s: string) => this.pipe.sendText(uid, s);
-    if (!isAgyAgent()) {
+    if (!this.isAgyAgent()) {
       await send("⚠️ /effort 仅在 AGENT=antigravity 时可用。");
       return;
     }
@@ -384,28 +409,37 @@ export class Bot {
   }
 
   async askPermission(uid: string, tool: string, summary: string): Promise<boolean> {
+    if (this.pending.has(uid)) {
+      log.warn("同一用户出现并发危险操作审批，后到请求默认拒绝: user=%s tool=%s", mask(uid), tool);
+      return false;
+    }
     const preview = summary.length > 400 ? summary.slice(0, 400) + "…" : summary;
-    await this.pipe.sendText(
-      uid,
-      `🔐 agent 要执行危险操作 \`${tool}\`：\n\`\`\`\n${preview}\n\`\`\`\n回复 y 允许 / n 拒绝（120 秒不回默认拒绝）`,
-    );
-    return new Promise<boolean>((resolve) => {
+    let finish!: (allow: boolean) => void;
+    const answer = new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(uid);
         log.info("危险操作审批超时（默认拒绝）: user=%s tool=%s", mask(uid), tool);
         resolve(false);
       }, 120000);
-      this.pending.set(uid, (allow: boolean) => {
+      finish = (allow: boolean) => {
         clearTimeout(timer);
         this.pending.delete(uid);
         resolve(allow);
-      });
+      };
+      this.pending.set(uid, finish);
     });
+    const sent = await this.pipe.sendText(
+      uid,
+      `🔐 agent 要执行危险操作 \`${tool}\`：\n\`\`\`\n${preview}\n\`\`\`\n回复 y 允许 / n 拒绝（120 秒不回默认拒绝）`,
+    ).catch(error => {
+      log.error("发送危险操作审批失败: %s", (error as Error).message);
+      return false;
+    });
+    if (!sent) finish(false);
+    return answer;
   }
 
   // ── TUI / 运维只读访问器 ──────────────────────────────────────────
-  getRunningUsers(): string[] { return [...this.running.keys()]; }
-  getPendingApprovals(): string[] { return [...this.pending.keys()]; }
   getWsStatus() { return this.ws.getStatus(); }
   /** 订阅 WS 连接状态变化（TUI 状态栏）。返回取消订阅。 */
   onWsStatus(cb: (s: string, attempt: number) => void): () => void {
@@ -415,7 +449,9 @@ export class Bot {
   getAuthStatus() { return this.tm.getStatus(); }
   async sendTest(uid: string, text: string): Promise<boolean> { return this.pipe.sendText(uid, text); }
 
-  private stopRunning(uid: string): boolean {
+  private cancelTasks(uid: string): boolean {
+    const hadTask = this.pending.has(uid) || this.running.has(uid) || this.locks.has(uid);
+    this.taskEpoch.set(uid, (this.taskEpoch.get(uid) ?? 0) + 1);
     // 先取消挂起的危险操作审批，否则它会吞掉用户的下一条普通消息
     const pend = this.pending.get(uid);
     if (pend) pend(false); // resolver 内部会清 timer + 删 entry
@@ -424,21 +460,27 @@ export class Bot {
       ac.abort();
       return true;
     }
-    return !!pend;
+    return hadTask;
   }
 
   private withLock<T>(uid: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.locks.get(uid) ?? Promise.resolve();
     const run = prev.catch(() => {}).then(() => fn());
-    this.locks.set(uid, run.then(
-      () => {},
-      () => {},
-    ));
+    const tail = run.then(() => {}, () => {});
+    this.locks.set(uid, tail);
+    void tail.finally(() => {
+      if (this.locks.get(uid) === tail) this.locks.delete(uid);
+    });
     return run;
   }
 
   private async dispatch(msg: InboundMessage): Promise<void> {
+    const epoch = this.taskEpoch.get(msg.senderId) ?? 0;
     await this.withLock(msg.senderId, async () => {
+      if (this.stopped || epoch !== (this.taskEpoch.get(msg.senderId) ?? 0)) {
+        log.info("跳过已被取消的排队任务: user=%s", mask(msg.senderId));
+        return;
+      }
       const ac = new AbortController();
       this.running.set(msg.senderId, ac);
       try {
@@ -476,28 +518,32 @@ export class Bot {
         attachments.push(p);
         log.info("入站附件已落盘: %s", p);
       } else {
-        // 下载失败（多为服务端预签名 URL 签名无效）：提示用户，避免 agent 读旧文件误识别
+        // 下载失败时显式提示，避免 agent 误以为附件已经落盘。
         attachFailed = true;
-        await this.pipe.sendTip(uid, "⚠️ 附件下载失败（服务端预签名 URL 签名无效），请联系运维排查或重发。");
+        await this.pipe.sendTip(uid, "⚠️ 附件下载失败，请重发；若持续失败请联系运维查看日志。");
       }
     }
 
-    // 2) 记首条消息作标题 + 取当前槽位的原生 agent sessionId（供 resume）
+    // 2) 锁定本轮槽位；agent/cwd 变化时 registry 自动开启新的原生 session。
     const userText = attachFailed
       ? (msg.text ? `${msg.text}\n（注：你发的附件下载失败，无法读取，请基于文字内容回复。）` : "(用户发来了附件，但下载失败，无法读取)")
       : (msg.text || "(用户发来了附件)");
-    await registry.noteUser(uid, userText);
-    const sessionId = await registry.getActiveSessionId(uid);
+    const turn = await registry.beginTurn(uid, this.agent.name, wd, userText);
 
     // 3) agent 执行（带 resume + 危险审批 + 中断）
-    if (isAgyAgent()) this.runningProgress.set(uid, "正在启动 agy");
+    if (this.isAgyAgent()) this.runningProgress.set(uid, "正在启动 agy");
     const result = await this.agent.reply(uid, userText, wd, attachments, {
-      sessionId,
+      sessionId: turn.sessionId,
       askPermission: (u, t, s) => this.askPermission(u, t, s),
       abortController: ac,
       onProgress: event => this.recordProgress(uid, event),
     });
-    if (result.sessionId) await registry.finishTurn(uid, result.sessionId);
+    throwIfAborted(ac);
+    const recorded = await registry.finishTurn(uid, turn, result.sessionId ?? null);
+    if (!recorded) {
+      log.info("任务完成时会话已被重置/删除，跳过回写: user=%s slot=%s", mask(uid), turn.slotId);
+    }
+    throwIfAborted(ac);
     if (result.meta) this.lastRunMeta.set(uid, result.meta);
 
     // 4) agy 优先使用 JSON Schema 的 files；Claude 继续兼容 [[FILE: ...]]。
@@ -542,11 +588,20 @@ export class Bot {
     this.runningProgress.set(uid, `${label}${state}: ${event.text.slice(0, 160)}`);
   }
 
+  private isAgyAgent(): boolean {
+    return isAgyAgentName(this.agent.name);
+  }
+
+  private clearSessionRuntime(uid: string): void {
+    this.runningProgress.delete(uid);
+    this.lastRunMeta.delete(uid);
+  }
+
   private async fmtSessions(uid: string): Promise<string> {
     const sessions = await registry.listSessions(uid);
     if (!sessions.length) return "（暂无会话）";
-    const lines = ["会话列表:"];
-    for (const s of sessions) lines.push(`  ${s.num}. ${s.title}（${s.turns} 轮）${s.active ? " ← 当前" : ""}`);
+    const lines = ["会话列表:", ""];
+    for (const s of sessions) lines.push(`${s.num}. ${s.title.replace(/\s+/g, " ")}（${s.turns} 轮）${s.active ? " ← 当前" : ""}`);
     lines.push("\n（/use <编号> 切换，/del <编号> 删除）");
     return lines.join("\n");
   }
@@ -564,7 +619,7 @@ function formatRunMeta(meta: AgentRunMeta | undefined): string {
   if (!meta) return "";
   const parts: string[] = [];
   if (meta.durationSeconds !== undefined) parts.push(`${meta.durationSeconds.toFixed(1)}s`);
-  if (meta.numTurns !== undefined) parts.push(`${meta.numTurns} turns`);
+  if (meta.numTurns !== undefined) parts.push(`${meta.numTurns} turn${meta.numTurns === 1 ? "" : "s"}`);
   if (meta.usage?.totalTokens !== undefined) parts.push(`${meta.usage.totalTokens} tokens`);
   if (meta.usage?.cacheReadTokens) parts.push(`cache ${meta.usage.cacheReadTokens}`);
   return parts.join(" · ");
@@ -593,21 +648,24 @@ function answerIsYes(text: string): boolean {
 }
 
 function fmtConfig(): string {
-  const lines = ["当前配置（/config <编号|名称> <值> 修改）:"];
+  const lines = ["当前配置（/config <编号|名称> <值> 修改）:", "", "```text"];
   EDITABLE.forEach((e, i) => {
-    let v = String(getValue(e.key)).replace(/\n/g, " ");
+    let v = String(getValue(e.key)).replace(/\s+/g, " ").replace(/`/g, "ˋ");
     if (v.length > 48) v = v.slice(0, 48) + "…";
-    lines.push(`  ${String(i + 1).padStart(2)}. ${String(e.key).padEnd(22)} = ${v}${e.restart ? " [重启]" : ""}`);
+    lines.push(`${String(i + 1).padStart(2)}. ${String(e.key).padEnd(22)} = ${v}${e.restart ? " [重启]" : ""}`);
   });
+  lines.push("```");
   return lines.join("\n");
 }
 
 function fmtModels(models: ModelInfo[], current: string | null, sourceLabel: string): string {
-  const lines = [`模型列表（来自 ${sourceLabel}）:`];
+  const lines = [`模型列表（来自 ${sourceLabel}）:`, ""];
   models.forEach((m, i) => {
     const mark = m.id === current ? " ← 当前" : "";
-    const label = m.name && m.name !== m.id ? `${m.id}（${m.name}）` : m.id;
-    lines.push(`  ${i + 1}. ${label}${mark}`);
+    const id = m.id.replace(/\s+/g, " ");
+    const name = m.name?.replace(/\s+/g, " ");
+    const label = name && name !== id ? `${id}（${name}）` : id;
+    lines.push(`${i + 1}. ${label}${mark}`);
   });
   lines.push("\n（/model <编号|名称> 选择，/model default 用默认）");
   return lines.join("\n");
@@ -617,7 +675,9 @@ function mask(s: string): string {
   return s.length > 8 ? s.slice(0, 6) + "***" : "***";
 }
 
-function isAgyAgent(): boolean {
-  const agent = cfg.AGENT.toLowerCase();
-  return agent === "antigravity" || agent === "agy";
+function throwIfAborted(controller: AbortController): void {
+  if (!controller.signal.aborted) return;
+  const error = new Error("用户中断（/stop 或会话切换）");
+  error.name = "AbortError";
+  throw error;
 }

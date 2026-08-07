@@ -1,26 +1,46 @@
 /**
- * 从用户自己的 Claude Code 网关拉可用模型列表（供 /model 命令与 TUI 模型选择用）。
+ * 按当前 agent 拉取可用模型列表（供 /model 命令与 TUI 模型选择用）。
  *
- * 只依赖 claude agent sdk，不引入 @anthropic-ai/sdk——这里用原生 fetch 直接打网关。
+ * Claude 分支不引入 @anthropic-ai/sdk，直接用原生 fetch 访问用户自己的网关；
  * 我们不配置 CC 的 key/base-url（那是用户自己的事），按“进程 env 优先、
  * ~/.claude/settings.json 的 env 兜底”读取 ANTHROPIC_BASE_URL(+key/token)。
  * 同时兼容 Anthropic 风格 /v1/models 与 OpenAI 风格 /models；后者用于 DeepSeek
  * 这类“消息走 /anthropic、模型列表走根路径 /models”的后端。
  *
  * 响应形态支持 {data:[{id,display_name}],has_more,last_id}、数组、或字符串数组。
- * 若后端没有模型列表端点，上层仍允许用 /model <名字> 手填。
+ * Antigravity 分支则读取 `agy models`。若后端没有模型列表端点，上层仍允许
+ * 用 /model <名字> 手填。
  */
 import { spawnSync } from "node:child_process";
 import { cfg } from "../config.ts";
 import { getLogger } from "../logger.ts";
 import { readClaudeEnv } from "./claude-settings.ts";
 import { resolveAgyCliPath } from "./agy-cli.ts";
+import { normalizeAgentKind } from "./kind.ts";
 
 const log = getLogger("models");
 
 export interface ModelInfo {
   id: string;
   name?: string;
+}
+
+export interface AgentModelProfile {
+  configKey: "CLAUDE_MODEL" | "AGY_MODEL";
+  current: string | null;
+  sourceLabel: string;
+}
+
+/** 返回当前 agent 的模型配置入口；echo 等无模型 agent 返回 null。 */
+export function modelProfileForAgent(agentName: string): AgentModelProfile | null {
+  const agent = normalizeAgentKind(agentName);
+  if (agent === "antigravity") {
+    return { configKey: "AGY_MODEL", current: cfg.AGY_MODEL, sourceLabel: "agy models" };
+  }
+  if (agent === "claude") {
+    return { configKey: "CLAUDE_MODEL", current: cfg.CLAUDE_MODEL, sourceLabel: "Claude Code 网关" };
+  }
+  return null;
 }
 
 interface ModelEndpoint {
@@ -71,7 +91,10 @@ async function fetchEndpoint(endpoint: ModelEndpoint, apiKey: string, authToken:
     const arr: any[] = Array.isArray(json?.data) ? json.data : Array.isArray(json) ? json : [];
     for (const m of arr) {
       if (typeof m === "string") list.push({ id: m });
-      else if (m && typeof m.id === "string") list.push({ id: m.id, name: m.display_name ?? m.name });
+      else if (m && typeof m.id === "string") {
+        const candidateName = m.display_name ?? m.name;
+        list.push({ id: m.id, name: typeof candidateName === "string" ? candidateName : undefined });
+      }
     }
     if (endpoint.openAiAuth || !json?.has_more || !json?.last_id) break;
     after = String(json.last_id);
@@ -126,8 +149,8 @@ export function fetchAgyModels(): ModelInfo[] {
     shell: false,
   });
   if (r.error) throw new Error(`agy models 执行失败: ${(r.error as Error).message}`);
-  if (r.status !== 0 && !r.stdout) {
-    const detail = (r.stderr || "").trim().slice(0, 200);
+  if (r.status !== 0) {
+    const detail = (r.stderr || r.stdout || "").trim().slice(0, 200);
     throw new Error(`agy models 退出码 ${r.status}${detail ? `: ${detail}` : ""}`);
   }
   const out = (r.stdout || "").trim();
@@ -183,10 +206,9 @@ export function parseAgyModelsOutput(output: string): ModelInfo[] {
  * - claude → fetchModels()（Anthropic/OpenAI 网关）
  * - antigravity/agy → fetchAgyModels()（agy models 子进程）
  */
-export async function fetchAgentModels(): Promise<ModelInfo[]> {
-  const agent = cfg.AGENT.toLowerCase();
-  if (agent === "antigravity" || agent === "agy") {
-    return fetchAgyModels();
-  }
-  return fetchModels();
+export async function fetchAgentModels(agentName: string = cfg.AGENT): Promise<ModelInfo[]> {
+  const agent = normalizeAgentKind(agentName);
+  if (agent === "antigravity") return fetchAgyModels();
+  if (agent === "claude") return fetchModels();
+  throw new Error(`agent=${agent || "(空)"} 不支持模型选择`);
 }

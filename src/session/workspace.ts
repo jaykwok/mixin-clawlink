@@ -54,7 +54,7 @@ export class Workspace {
 
   constructor(root?: string) {
     this.root = resolve(expandHome(root ?? cfg.WORKSPACE));
-    mkdirSync(this.root, { recursive: true }); // 必须存在：否则 claude.exe 以此为 cwd 启动会 ENOENT
+    mkdirSync(this.root, { recursive: true }); // 必须存在：否则 agent 子进程以此为 cwd 启动会 ENOENT
   }
 
   /** 该用户当前工作目录（未切换过则为根目录）。 */

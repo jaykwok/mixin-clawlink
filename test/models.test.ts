@@ -2,7 +2,14 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fetchModels } from "../src/agents/models.ts";
+import { fetchAgentModels, fetchModels, modelProfileForAgent } from "../src/agents/models.ts";
+
+test("模型工作流显式区分 Claude、agy 与无模型的 echo", async () => {
+  expect(modelProfileForAgent("agy")).toMatchObject({ configKey: "AGY_MODEL", sourceLabel: "agy models" });
+  expect(modelProfileForAgent("claude")).toMatchObject({ configKey: "CLAUDE_MODEL", sourceLabel: "Claude Code 网关" });
+  expect(modelProfileForAgent("echo")).toBeNull();
+  await expect(fetchAgentModels("echo")).rejects.toThrow("不支持模型选择");
+});
 
 test("从 Claude 用户配置读取 DeepSeek base，并用根路径 /models 拉模型", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mixin-clawlink-"));

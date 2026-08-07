@@ -15,13 +15,9 @@ const SUCCESS_CODES = [0, 200];
 const DEDUP_TTL_S = 30; // 内容指纹去重窗口：平台可能用不同 msgUid 重发同一条
 
 export interface InboundMessage {
-  messageId: string;
-  chatId: string; // groupId 或 userId（回复时用）
-  senderId: string; // 发送者 userId（回复的 receive_id）
-  msgType: string; // text/markdown/image/file/voice/video
+  senderId: string; // 私聊回复的 receive_id，也是会话隔离键
   text: string;
   fileId?: string | null;
-  fileName?: string | null;
 }
 
 function mask(s: string): string {
@@ -44,10 +40,6 @@ export class MessagePipe {
     this.tm = tm;
   }
 
-  async aclose(): Promise<void> {
-    /* 全局 fetch 无需关闭；保留方法与生命周期对称 */
-  }
-
   // ── 入站 ────────────────────────────────────────────────────────
   async parseInbound(raw: string): Promise<InboundMessage | null> {
     let frame: any;
@@ -58,6 +50,9 @@ export class MessagePipe {
       return null;
     }
 
+    const dataStr = frame.data;
+    if (typeof dataStr !== "string") return null;
+
     // HMAC 验签（仅当三个 X-CTQ-* 字段都在时）
     const ts = frame["X-CTQ-Timestamp"];
     const nonce = frame["X-CTQ-Nonce"];
@@ -65,7 +60,7 @@ export class MessagePipe {
     if (ts && nonce && sig) {
       const token = await this.tm.get();
       const expected = createHmac("sha256", token)
-        .update(`${ts}${nonce}${frame.data ?? ""}`, "utf8")
+        .update(`${ts}${nonce}${dataStr}`, "utf8")
         .digest("hex");
       if (!safeEqualStr(expected, String(sig))) {
         log.warn("HMAC 验签失败，丢弃该帧");
@@ -73,8 +68,6 @@ export class MessagePipe {
       }
     }
 
-    const dataStr = frame.data;
-    if (typeof dataStr !== "string") return null;
     let cb: any;
     try {
       cb = JSON.parse(dataStr);
@@ -88,18 +81,20 @@ export class MessagePipe {
       return null;
     }
 
-    const msgUid = cb.msgUid ?? "";
-    const senderId = cb.userId ?? "";
+    const msgUid = typeof cb.msgUid === "string" ? cb.msgUid : "";
+    const senderId = typeof cb.userId === "string" ? cb.userId.trim() : "";
+    if (!senderId) {
+      log.warn("direct callback 缺少 userId，已丢弃");
+      return null;
+    }
     if (cfg.BOT_USER_ID && senderId === cfg.BOT_USER_ID) return null; // anti-loop
     if (msgUid && this.isDuplicate(msgUid)) {
       log.debug("重复消息已跳过: %s", msgUid);
       return null;
     }
 
-    const msgType: string = cb.type ?? "text";
+    const msgType = typeof cb.type === "string" ? cb.type.toLowerCase() : "text";
     const content = cb.content ?? {};
-    const chatId = cb.groupId || senderId;
-
     // 斜杠命令不走内容去重：用户可能连续点 /list /status 等，靠 msgUid 防 WS 重投即可
     const rawText = typeof content === "object" && content ? String(content.content ?? "") : String(content);
     const isCommand = msgType === "text" && rawText.trim().startsWith("/");
@@ -109,22 +104,29 @@ export class MessagePipe {
     }
 
     if (msgType === "text") {
-      const text = typeof content === "object" && content ? content.content ?? "" : String(content);
-      return { messageId: msgUid, chatId, senderId, msgType: "text", text };
+      const text = typeof content === "object" && content ? String(content.content ?? "") : String(content);
+      return { senderId, text };
     }
     if (msgType === "markdown") {
-      const title = (typeof content === "object" && content ? content.title : "") ?? "";
-      const body = typeof content === "object" && content ? content.content ?? "" : String(content);
+      const title = String((typeof content === "object" && content ? content.title : "") ?? "");
+      const body = typeof content === "object" && content ? String(content.content ?? "") : String(content);
       const text = title ? `# ${title}\n${body}` : body;
-      return { messageId: msgUid, chatId, senderId, msgType: "markdown", text };
+      return { senderId, text };
     }
 
     // 媒体消息
+    if (!["image", "file", "voice", "video"].includes(msgType)) {
+      log.debug("忽略不支持的消息类型: %s", msgType);
+      return null;
+    }
     const fileId = typeof content === "object" && content ? content.fileId : null;
+    if (typeof fileId !== "string" || !fileId.trim()) {
+      log.warn("%s 消息缺少 fileId，已丢弃", msgType);
+      return null;
+    }
     const alt = (typeof content === "object" && content ? content.altText ?? content.fileName : "") ?? "";
     return {
-      messageId: msgUid, chatId, senderId, msgType, text: alt,
-      fileId: fileId ?? null, fileName: alt || null,
+      senderId, text: String(alt), fileId: fileId.trim(),
     };
   }
 
@@ -140,11 +142,11 @@ export class MessagePipe {
   }
 
   private fingerprint(senderId: string, msgType: string, content: any): string {
-    if (content && typeof content === "object") {
-      if (content.fileId) return `${senderId}:${msgType}:${content.fileId}`;
-      return `${senderId}:${msgType}:${String(content.content ?? "").slice(0, 200)}`;
-    }
-    return `${senderId}:${msgType}:${String(content).slice(0, 200)}`;
+    const payload = content && typeof content === "object"
+      ? content.fileId ? `file:${content.fileId}` : JSON.stringify(content)
+      : String(content);
+    const digest = createHash("sha256").update(payload).digest("hex");
+    return `${senderId}:${msgType}:${digest}`;
   }
 
   private isRecent(key: string): boolean {
@@ -165,7 +167,7 @@ export class MessagePipe {
   }
 
   // ── 出站：HTTP API（Bearer）─────────────────────────────────────
-  private async apiPost(path: string, body: Record<string, unknown>, retryOn401 = true): Promise<any | null> {
+  private async apiPost(path: string, body: Record<string, unknown>): Promise<any | null> {
     const url = `${cfg.API_BASE}${path}`;
     for (let attempt = 1; attempt <= 2; attempt++) {
       const token = await this.tm.get();
@@ -182,7 +184,7 @@ export class MessagePipe {
         if (attempt === 2) return null;
         continue;
       }
-      if (resp.status === 401 && retryOn401) {
+      if (resp.status === 401) {
         log.warn("%s 收到 401，失效 token 重试", path);
         this.tm.invalidate();
         continue;
@@ -196,7 +198,13 @@ export class MessagePipe {
         log.error("%s HTTP %d: %s", path, resp.status, (await resp.text().catch(() => "")).slice(0, 300));
         return null;
       }
-      const data: any = await resp.json();
+      let data: any;
+      try {
+        data = await resp.json();
+      } catch (error) {
+        log.error("%s 响应不是有效 JSON: %s", path, (error as Error).message);
+        return null;
+      }
       if (!SUCCESS_CODES.includes(data.code) && data.success !== true) {
         log.error("%s 业务错误 code=%s msg=%s", path, data.code, data.msg);
         return null;
@@ -245,18 +253,26 @@ export class MessagePipe {
     });
     if (!init) return null;
     const d = MessagePipe.payload(init);
-    if (d.deduplicatedHit && d.fileKey) {
+    if (d.deduplicatedHit && typeof d.fileKey === "string" && d.fileKey) {
       log.info("upload 秒传命中: %s", fileName);
       return d.fileKey;
     }
-    const uploadId = d.uploadId;
+    const uploadId = typeof d.uploadId === "string" ? d.uploadId : "";
     if (!uploadId) {
       log.error("upload init 未返回 uploadId，原始响应: %s", JSON.stringify(init));
       return null;
     }
-    const parts = new Map<number, any>((d.parts ?? []).map((p: any) => [p.partNumber, p]));
-    // 用 || 而非 ??：d.chunkSize 为空串/0 时也回退（parseInt("")=NaN 会让分片循环卡死）
-    const chunkSize = parseInt(d.chunkSize || String(cfg.UPLOAD_CHUNK_MB * 1024 * 1024), 10);
+    if (!Array.isArray(d.parts)) {
+      log.error("upload init 未返回 parts 数组");
+      return null;
+    }
+    const parts = new Map<number, any>(d.parts.map((p: any) => [p.partNumber, p]));
+    const configuredChunkSize = cfg.UPLOAD_CHUNK_MB * 1024 * 1024;
+    const advertisedChunkSize = Number.parseInt(String(d.chunkSize ?? ""), 10);
+    // 无效、0 或负数都会让分片循环失效；统一回退到本地配置。
+    const chunkSize = Number.isFinite(advertisedChunkSize) && advertisedChunkSize > 0
+      ? advertisedChunkSize
+      : configuredChunkSize;
     const completed: any[] = [];
     for (let i = 0; i < data.length; i += chunkSize) {
       const partNo = Math.floor(i / chunkSize) + 1;
@@ -270,9 +286,13 @@ export class MessagePipe {
       if (etag === null) return null;
       completed.push({ partNumber: partNo, etag, size: chunk.length });
     }
-    const result = await this.apiPost(`/files/upload/${uploadId}/complete`, { parts: completed, fileHash });
+    const result = await this.apiPost(`/files/upload/${encodeURIComponent(uploadId)}/complete`, { parts: completed, fileHash });
     if (!result) return null;
     const fileKey = MessagePipe.payload(result).fileKey;
+    if (typeof fileKey !== "string" || !fileKey) {
+      log.error("upload complete 未返回 fileKey");
+      return null;
+    }
     log.info("upload 完成: %s → %s", fileName, fileKey);
     return fileKey;
   }
@@ -286,7 +306,12 @@ export class MessagePipe {
         return null;
       }
       const etag = resp.headers.get("etag") ?? "";
-      return etag.replace(/^"|"$/g, "");
+      const normalized = etag.replace(/^"|"$/g, "");
+      if (!normalized) {
+        log.error("分片上传成功但响应缺少 ETag");
+        return null;
+      }
+      return normalized;
     } catch (e) {
       log.error("分片上传网络错误: %s", (e as Error).message);
       return null;
@@ -310,36 +335,58 @@ export class MessagePipe {
   }
 
   async downloadFile(fileId: string): Promise<{ data: Buffer; name: string; mime: string } | null> {
-    const token = await this.tm.get();
-    let resp: Response;
-    try {
-      resp = await fetch(`${cfg.API_BASE}/files/${fileId}/download`, {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(cfg.HTTP_TIMEOUT * 1000),
-      });
-    } catch (e) {
-      log.error("下载取址网络错误: %s", (e as Error).message);
-      return null;
+    const endpoint = `${cfg.API_BASE}/files/${encodeURIComponent(fileId)}/download`;
+    let info: any = {};
+    let fileUrl = "";
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const token = await this.tm.get();
+      let resp: Response;
+      try {
+        resp = await fetch(endpoint, {
+          headers: { Authorization: `Bearer ${token}` },
+          redirect: "manual",
+          signal: AbortSignal.timeout(cfg.HTTP_TIMEOUT * 1000),
+        });
+      } catch (e) {
+        log.error("下载取址网络错误: %s", (e as Error).message);
+        return null;
+      }
+      if (resp.status === 401 && attempt === 1) {
+        this.tm.invalidate();
+        continue;
+      }
+      if (resp.status >= 300 && resp.status < 400) {
+        const location = resp.headers.get("location");
+        if (location) {
+          try {
+            fileUrl = new URL(location, endpoint).toString();
+          } catch (error) {
+            log.error("下载取址返回无效跳转地址: %s", (error as Error).message);
+            return null;
+          }
+        }
+      } else if (resp.ok) {
+        try {
+          info = MessagePipe.payload(await resp.json());
+          fileUrl = typeof info.fileUrl === "string" ? info.fileUrl : "";
+        } catch (error) {
+          log.error("下载取址响应不是有效 JSON: %s", (error as Error).message);
+          return null;
+        }
+      } else {
+        log.error("下载取址 HTTP %d", resp.status);
+        return null;
+      }
+      break;
     }
-    // 官方插件允许 302（parseResponse: !response.ok && status !== 302）
-    if (!resp.ok && resp.status !== 302) {
-      log.error("下载取址 HTTP %d", resp.status);
-      return null;
-    }
-    const info = MessagePipe.payload(await resp.json());
-    const fileUrl = info.fileUrl;
     if (!fileUrl) {
-      log.error("下载取址未返回 fileUrl: %s", JSON.stringify(info));
+      log.error("下载取址未返回 fileUrl");
       return null;
     }
-    log.info("下载取址成功: fileUrl=%s", fileUrl);
-    // 打印完整响应字段，便于诊断预签名 URL 签名无效等服务端问题
-    log.info("下载取址完整响应: %s", JSON.stringify(info));
+    // 不记录预签名 URL 或完整响应，避免把签名参数写入日志。
+    log.info("下载取址成功");
 
-    // 预签名 URL，无需鉴权；fetch 自动跟随重定向。
-    // 注：曾尝试 https.get + 双斜杠规范化规避 SignatureDoesNotMatch，但实测无效——
-    // 403 根因是服务端生成的签名与 URL 路径不匹配（//chatAttachment 双斜杠 + /downloadmi 网关前缀），
-    // 客户端无法修，需服务端排查。故回退到最朴素的 fetch(fileUrl)。
+    // 预签名 URL 无需鉴权；原样请求，路径签名不允许客户端重写。
     let fresp: Response;
     try {
       fresp = await fetch(fileUrl, {
@@ -347,14 +394,48 @@ export class MessagePipe {
       });
       if (!fresp.ok) throw new Error(`HTTP ${fresp.status}`);
     } catch (e) {
-      log.error("下载文件失败: %s（疑似服务端预签名 URL 签名无效）", (e as Error).message);
+      log.error("下载文件失败: %s", (e as Error).message);
       return null;
     }
 
-    const buf = Buffer.from(await fresp.arrayBuffer());
-    const name = info.fileName ?? fileId;
-    const mime = info.mimeType ?? "application/octet-stream";
+    const maxBytes = cfg.MAX_FILE_MB * 1024 * 1024;
+    const buf = await this.readLimited(fresp, maxBytes);
+    if (!buf) return null;
+    const name = typeof info.fileName === "string" && info.fileName.trim() ? info.fileName : fileId;
+    const mime = typeof info.mimeType === "string" && info.mimeType.trim()
+      ? info.mimeType
+      : fresp.headers.get("content-type") ?? "application/octet-stream";
     log.info("📥 已下载附件 %s (%sKB)", name, (buf.length / 1024).toFixed(1));
     return { data: buf, name, mime };
+  }
+
+  private async readLimited(resp: Response, maxBytes: number): Promise<Buffer | null> {
+    const declared = Number.parseInt(resp.headers.get("content-length") ?? "", 10);
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      log.error("下载文件 %sMB 超过上限 %dMB", (declared / 1048576).toFixed(1), cfg.MAX_FILE_MB);
+      return null;
+    }
+    if (!resp.body) return Buffer.alloc(0);
+    const reader = resp.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => {});
+          log.error("下载文件超过 %dMB 上限，已中止", cfg.MAX_FILE_MB);
+          return null;
+        }
+        chunks.push(value);
+      }
+    } catch (error) {
+      await reader.cancel().catch(() => {});
+      log.error("读取下载内容失败: %s", (error as Error).message);
+      return null;
+    }
+    return Buffer.concat(chunks.map(chunk => Buffer.from(chunk)), total);
   }
 }

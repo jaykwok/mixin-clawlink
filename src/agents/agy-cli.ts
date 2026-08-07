@@ -1,5 +1,5 @@
 /** agy CLI 路径查找与版本探测（仅支持 1.1.10+）。 */
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -13,7 +13,11 @@ function expandHome(p: string): string {
 function usableFile(path: string | undefined | null): string | null {
   if (!path) return null;
   const full = resolve(expandHome(path.trim().replace(/^"|"$/g, "")));
-  return existsSync(full) ? full : null;
+  try {
+    return statSync(full).isFile() ? full : null;
+  } catch {
+    return null;
+  }
 }
 
 function findOnPath(): string | null {

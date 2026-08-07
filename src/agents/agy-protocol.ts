@@ -190,7 +190,6 @@ export class AgyStreamParser {
     const lines = this.pending.split(/\r?\n/);
     this.pending = flush ? "" : (lines.pop() ?? "");
     for (const line of lines) this.consumeLine(line);
-    if (flush && this.pending.trim()) this.consumeLine(this.pending);
   }
 
   private consumeLine(line: string): void {
@@ -219,9 +218,7 @@ export class AgyStreamParser {
 
   private recordCompletedStep(step: Record<string, unknown>): void {
     if (String(step.state ?? "").toUpperCase() !== "DONE") return;
-    const conversationId = nonEmptyString(step.conversation_id) ?? this.conversationIdValue ?? "unknown";
-    const index = String(step.step_index ?? "unknown");
-    this.completedSteps.set(`${conversationId}:${index}`, {
+    this.completedSteps.set(this.stepKey(step), {
       type: String(step.step_type ?? "").toLowerCase(),
       durationSeconds: finiteNumber(step.duration_seconds),
       usage: parseUsage(step.usage),
@@ -241,22 +238,22 @@ export class AgyStreamParser {
   }
 
   private consumeStep(step: Record<string, unknown>): void {
-    const index = String(step.step_index ?? "unknown");
+    const key = this.stepKey(step);
     const state = String(step.state ?? "").toUpperCase();
     const type = String(step.step_type ?? "").toLowerCase();
     if (type === "agent_response") {
       const delta = typeof step.text_delta === "string" ? step.text_delta : "";
-      this.narration.set(index, (this.narration.get(index) ?? "") + delta);
+      this.narration.set(key, (this.narration.get(key) ?? "") + delta);
       if (state === "DONE") {
-        const text = (this.narration.get(index) ?? "").trim();
-        this.narration.delete(index);
+        const text = (this.narration.get(key) ?? "").trim();
+        this.narration.delete(key);
         if (text) this.emit({ kind: "agent", state: "done", text });
       }
       return;
     }
     if (type === "tool") {
-      if (state === "ACTIVE" && !this.emittedTools.has(index)) {
-        this.emittedTools.add(index);
+      if (state === "ACTIVE" && !this.emittedTools.has(key)) {
+        this.emittedTools.add(key);
         this.emit({ kind: "tool", state: "active", text: toolSummary(step) });
       } else if (state === "DONE") {
         this.emit({ kind: "tool", state: "done", text: toolSummary(step) });
@@ -264,13 +261,18 @@ export class AgyStreamParser {
       return;
     }
     if (type === "subagent") {
-      if (state === "ACTIVE" && !this.emittedSubagents.has(index)) {
-        this.emittedSubagents.add(index);
+      if (state === "ACTIVE" && !this.emittedSubagents.has(key)) {
+        this.emittedSubagents.add(key);
         this.emit({ kind: "subagent", state: "active", text: subagentSummary(step) });
       } else if (state === "DONE") {
         this.emit({ kind: "subagent", state: "done", text: subagentSummary(step) });
       }
     }
+  }
+
+  private stepKey(step: Record<string, unknown>): string {
+    const conversationId = nonEmptyString(step.conversation_id) ?? this.conversationIdValue ?? "unknown";
+    return `${conversationId}:${String(step.step_index ?? "unknown")}`;
   }
 
   private emit(event: AgentProgress): void {

@@ -27,12 +27,18 @@ export class TokenManager {
       signal: AbortSignal.timeout(cfg.HTTP_TIMEOUT * 1000),
     });
     if (!resp.ok) throw new Error(`/auth/token HTTP ${resp.status}: ${await resp.text().catch(() => "")}`);
-    const data = (await resp.json()) as { access_token?: string; expires_in?: number };
-    if (!data.access_token) throw new Error(`/auth/token 未返回 access_token: ${JSON.stringify(data)}`);
+    const data = (await resp.json()) as { access_token?: unknown; expires_in?: unknown };
+    if (typeof data.access_token !== "string" || !data.access_token) {
+      throw new Error("/auth/token 未返回有效 access_token");
+    }
+    const parsedExpires = typeof data.expires_in === "number"
+      ? data.expires_in
+      : Number.parseInt(String(data.expires_in ?? ""), 10);
+    const expiresIn = Number.isFinite(parsedExpires) && parsedExpires > 0 ? parsedExpires : 7200;
     this.token = data.access_token;
-    this.expiresAt = Date.now() + (data.expires_in ?? 7200) * 1000 - cfg.TOKEN_REFRESH_LEAD_S * 1000;
+    this.expiresAt = Date.now() + expiresIn * 1000 - cfg.TOKEN_REFRESH_LEAD_S * 1000;
     this.invalidated = false;
-    log.info("access_token 已获取 (expires_in=%ss)", data.expires_in ?? 7200);
+    log.info("access_token 已获取 (expires_in=%ss)", expiresIn);
     return this.token;
   }
 

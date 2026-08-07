@@ -12,6 +12,7 @@ test("显式 Claude Code 路径存在时直接采用", () => {
   try {
     expect(resolveClaudeCliPath(executable)).toBe(executable);
     expect(resolveClaudeCliPath(join(dir, "missing.exe"))).toBeNull();
+    expect(resolveClaudeCliPath(dir)).toBeNull();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

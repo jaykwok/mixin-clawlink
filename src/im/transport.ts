@@ -5,7 +5,7 @@
  * 不支持自定义头，故用 ws 包。ws 不自动心跳，需自己 ping + pong 超时判假死。
  *
  * 脏断(token 失败 / ws error / 心跳超时)→ 抛错 → run() catch → 退避升级；
- * 干净关闭 → 正常返回 → attempt 重置（立即重连）。
+ * 干净关闭 → 正常返回 → attempt 重置（按基础 1 秒退避重连，避免紧循环）。
  */
 import WebSocket from "ws";
 import { cfg } from "../config.ts";
@@ -37,6 +37,7 @@ export class ConnectionManager {
   private running = false;
   private runPromise: Promise<void> = Promise.resolve();
   private sleepTimer: ReturnType<typeof setTimeout> | null = null;
+  private sleepResolve: (() => void) | null = null;
   private readonly url: string;
   /** 可观测连接状态（TUI 状态栏轮询 / onStatus 订阅）。 */
   status: "connecting" | "connected" | "reconnecting" = "connecting";
@@ -60,6 +61,9 @@ export class ConnectionManager {
       // 打断退避睡眠，让 run() 立刻看到 running=false
       clearTimeout(this.sleepTimer);
       this.sleepTimer = null;
+      const resolveSleep = this.sleepResolve;
+      this.sleepResolve = null;
+      resolveSleep?.();
     }
     try {
       this.ws?.close();
@@ -72,8 +76,10 @@ export class ConnectionManager {
   /** 可被 stop() 打断的 sleep。 */
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => {
+      this.sleepResolve = resolve;
       this.sleepTimer = setTimeout(() => {
         this.sleepTimer = null;
+        this.sleepResolve = null;
         resolve();
       }, ms);
     });
@@ -84,7 +90,7 @@ export class ConnectionManager {
     while (this.running) {
       try {
         await this.connectAndReceive();
-        this.attemptCount = 0; // 干净关闭 → 重置退避
+        this.attemptCount = 0; // 干净关闭 → 从基础 1 秒退避重新开始
       } catch (e) {
         log.warn("ws 断开: %s", (e as Error).message ?? e);
       }
@@ -112,7 +118,11 @@ export class ConnectionManager {
     this.setStatus("connecting");
     log.info("ws 连接中: %s", this.url);
 
-    const ws = new WebSocket(this.url, { headers, maxPayload: 5 * 1024 * 1024 });
+    const ws = new WebSocket(this.url, {
+      headers,
+      maxPayload: 5 * 1024 * 1024,
+      handshakeTimeout: cfg.HTTP_TIMEOUT * 1000,
+    });
     this.ws = ws;
 
     await new Promise<void>((resolve, reject) => {
@@ -179,6 +189,7 @@ export class ConnectionManager {
 
       ws.on("error", (err) => {
         log.warn("ws 错误: %s", err.message);
+        if (/\b401\b/.test(err.message)) this.tm.invalidate();
         errorSeen = err;
       });
 
