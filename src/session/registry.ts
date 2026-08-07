@@ -19,7 +19,7 @@ interface Slot {
   sessionId: string | null; // agent 原生 session ID（首轮 query 后回写；续接用）
   agent?: string;        // sessionId 所属 agent；旧索引首次使用时自动补齐
   workspace?: string;    // sessionId 创建时的 cwd，防止跨工作目录错误续接
-  generation?: number;   // reset/agent/cwd 变化时递增，阻止旧任务回写
+  generation?: number;   // agent/cwd 变化时递增，阻止旧任务回写
   title: string;
   created: number;       // ms epoch
   turns: number;
@@ -74,7 +74,7 @@ function resetSlot(slot: Slot, agent?: string, workspace?: string): void {
   slot.agent = agent ? normalizeAgentKind(agent) : undefined;
   slot.workspace = workspace ? resolve(workspace) : undefined;
   slot.generation = (slot.generation ?? 0) + 1;
-  slot.title = "(已清空)";
+  slot.title = PLACEHOLDER;
   slot.turns = 0;
 }
 
@@ -192,6 +192,7 @@ class Registry {
         if (!s.workspace || !sameWorkspace(s.workspace, cwd)) { s.workspace = cwd; changed = true; }
         if (s.generation === undefined) { s.generation = 0; changed = true; }
       }
+      // “(已清空)”仅用于兼容旧版清空命令留下的索引标题。
       if (text && (s.title === PLACEHOLDER || s.title === "(已清空)")) {
         s.title = text.slice(0, 30);
         changed = true;
@@ -207,7 +208,7 @@ class Registry {
     });
   }
 
-  /** 只回写发起该请求时的槽位/代次；reset、删除或切换 agent 后的旧任务不会污染新会话。 */
+  /** 只回写发起该请求时的槽位/代次；删除或切换 agent/cwd 后的旧任务不会污染新会话。 */
   async finishTurn(uid: string, turn: TurnContext, agentSessionId: string | null): Promise<boolean> {
     return this.withLock(uid, async () => {
       const idx = await this.read(uid);
@@ -282,18 +283,6 @@ class Registry {
         return true;
       }
       return false;
-    });
-  }
-
-  /** 清空当前槽位（下次请求不传 session ID，令当前 agent 新建会话）。 */
-  async resetSession(uid: string, agentName?: string, workspace?: string): Promise<void> {
-    return this.withLock(uid, async () => {
-      const idx = await this.ensure(uid);
-      const s = this.activeSlot(idx);
-      if (s) {
-        resetSlot(s, agentName, workspace);
-        await this.write(uid, idx);
-      }
     });
   }
 

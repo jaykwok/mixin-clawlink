@@ -25,7 +25,7 @@ function instructionsForAgent(agent: string): string {
 - 当用户要求“发送、发给我、回传、交付”某个文件时，不要只在正文中列出文件名或路径。
 ${fileProtocol}
 - 用户发送的非图片附件会由桥接器落盘，并在消息中提供绝对路径；需要时使用文件工具读取。
-- \`/new\`、\`/list\`、\`/use\`、\`/reset\`、\`/model\`、\`/effort\`、\`/send\` 等斜杠命令由 Mixin ClawLink 处理，不要把它们当作终端命令执行。${agySlash}
+- \`/clear\`、\`/list\`、\`/use\`、\`/model\`、\`/effort\`、\`/send\` 等斜杠命令由 Mixin ClawLink 处理，不要把它们当作终端命令执行。${agySlash}
 ${CLAWLINK_INSTRUCTIONS_END}`;
 }
 

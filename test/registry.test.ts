@@ -68,17 +68,16 @@ test("deleteSessions 删非活动会话不影响 active", async () => {
   expect(list[0].active).toBe(true); // 会话2仍是active
 });
 
-test("本轮绑定槽位代次，reset 后旧任务不能把 session 写回来", async () => {
+test("本轮绑定槽位代次，agent 切换后旧任务不能把 session 写回来", async () => {
   const uid = "u-generation";
   const workspace = join(tmpDir, "workspace-a");
   const turn = await registry.beginTurn(uid, "antigravity", workspace, "第一轮");
-  await registry.resetSession(uid, "antigravity", workspace);
+  const next = await registry.beginTurn(uid, "claude", workspace, "新一轮");
   expect(await registry.finishTurn(uid, turn, "stale-conversation-id")).toBeFalse();
 
-  const next = await registry.beginTurn(uid, "antigravity", workspace, "新一轮");
   expect(next.sessionId).toBeNull();
-  expect(await registry.finishTurn(uid, next, "fresh-conversation-id")).toBeTrue();
-  expect((await registry.listSessions(uid))[0]).toMatchObject({ agent: "antigravity", turns: 1 });
+  expect(await registry.finishTurn(uid, next, "fresh-session-id")).toBeTrue();
+  expect((await registry.listSessions(uid))[0]).toMatchObject({ agent: "claude", turns: 1 });
 });
 
 test("切换 agent 或工作目录时不复用不兼容的原生 session", async () => {

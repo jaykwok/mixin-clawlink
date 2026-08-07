@@ -102,10 +102,9 @@ bun start          # 凭据缺失时自动进入设置向导
 
 | 命令 | 作用 |
 |---|---|
-| `/new` | 新开一个会话并切到它 |
+| `/clear` | 新开一个会话并切到它 |
 | `/list` | 列出所有会话（带编号，标当前） |
 | `/use <编号>` | 切到指定会话 |
-| `/reset` | 清空当前会话（下次开新 session） |
 | `/del <编号>` | 删除会话，可多个：`/del 1` 或 `/del 1,3` |
 | `/config` | 查看 / 修改配置：`/config` 或 `/config <编号\|名称> <值>` |
 | `/model` | 选模型：`/model` 拉网关列表带编号、`/model <编号\|名称>` 切、`/model default` 清空回默认 |
@@ -121,13 +120,13 @@ bun start          # 凭据缺失时自动进入设置向导
 
 ### 2. 会话管理（多会话）
 
-- 每个会话槽位保存原生 session ID、所属 agent、工作目录和 reset 代次（`data/conversations/<userId>/index.json`）。旧格式会在首次续接时自动补齐归属信息。
+- 每个会话槽位保存原生 session ID、所属 agent、工作目录和会话代次（`data/conversations/<userId>/index.json`）。旧格式会在首次续接时自动补齐归属信息。
 - **Claude**：SDK 原生 `resume`，首轮 `query()` 后从结果抓 `session_id` 存盘，`/use` 切换后作为 `options.resume` 传回，恢复全量上下文。
 - **Antigravity**：从 `stream-json` 的 terminal `result` 直接取得 `conversation_id` 并存盘，后续用 `--conversation <uuid>` 精确续接；不再扫描或猜测 agy 的用户缓存文件。
-- `/new` 新开槽、`/list` 列编号、`/use N` 切、`/reset` 当前槽换新 session、`/del N` 删。
+- `/clear` 新开槽、`/list` 列编号、`/use N` 切、`/del N` 删。
 - session ID 只会在相同 agent 与工作目录下续接；切换 agent 或 `/cwd` 后，下一条消息会自动开启新的原生 session，避免跨 agent/cwd 恢复到不兼容的历史工具步骤。
-- 每轮请求绑定发起时的槽位和 reset 代次；即使 `/new`、`/reset`、`/use` 与旧任务结束发生竞态，旧 session 也不会回写到新会话。
-- `/stop`、`/new`、`/reset`、`/use`、`/del`、`/cwd` 会使此前排队的旧消息失效，避免它们随后误跑进新会话。
+- 每轮请求绑定发起时的槽位和会话代次；即使 `/clear`、`/use` 与旧任务结束发生竞态，旧 session 也不会回写到新会话。
+- `/stop`、`/clear`、`/use`、`/del`、`/cwd` 会使此前排队的旧消息失效，避免它们随后误跑进新会话。
 
 ### 3. 模型与推理强度
 

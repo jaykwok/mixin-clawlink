@@ -28,10 +28,9 @@ const log = getLogger("bot");
 const FILE_RE = /\[\[FILE:\s*(.+?)\]\]/g;
 
 const COMMANDS: Record<string, string> = {
-  "/new": "新开一个会话（并切到它）",
+  "/clear": "新开一个会话（并切到它）",
   "/list": "列出所有会话（带编号 1,2,3…）",
   "/use": "切到指定会话：/use <编号>",
-  "/reset": "清空当前会话的对话记录",
   "/del": "删除会话：/del 1 或 /del 1,3",
   "/config": "查看/修改配置：/config 或 /config <编号|名称> <值>",
   "/model": "查看/选择模型：/model 或 /model <编号|名称>，/model default 用默认",
@@ -175,7 +174,7 @@ export class Bot {
     const cmd = (text.split(/\s+/)[0] ?? "").toLowerCase();
     const send = (s: string) => this.pipe.sendText(uid, s);
 
-    if (cmd === "/new") {
+    if (cmd === "/clear") {
       this.cancelTasks(uid);
       const n = await registry.newSession(uid, this.agent.name, this.workspace.currentDir(uid));
       this.clearSessionRuntime(uid);
@@ -191,11 +190,6 @@ export class Bot {
       } else {
         await send("⚠️ 没有这个编号的会话，/list 看看。");
       }
-    } else if (cmd === "/reset") {
-      this.cancelTasks(uid);
-      await registry.resetSession(uid, this.agent.name, this.workspace.currentDir(uid));
-      this.clearSessionRuntime(uid);
-      await send(`🧹 已清空当前会话（下次对话开启新的 ${this.agent.name} session）。`);
     } else if (cmd === "/del") {
       const nums = parseIntList(text);
       if (!nums.length) {
